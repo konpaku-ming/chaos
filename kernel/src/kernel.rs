@@ -2241,12 +2241,20 @@ impl Channel {
                     drop(d);
                 } else {
                     drop(d);
+                    self.guard.v.store(false, Ordering::Release);
                     let mut wq = self.wq.q.lock().unwrap();
                     wq.push_back(thread::current());
                     drop(wq);
                     thread::park();
                 }
             }
+        }
+        loop {
+            if self.guard.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                core::hint::spin_loop();
+                continue;
+            }
+            break;
         }
         let v = {
             let mut ring = self.buf.lock().unwrap();
