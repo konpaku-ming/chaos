@@ -24,6 +24,9 @@ Cargo.lock
 # for idea
 .idea
 
+CLAUDE.md
+BUGFIX_LOG.md
+
 # for kernel module building
 # C & Rust
 modules/*/objs
