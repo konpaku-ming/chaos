@@ -1301,13 +1301,11 @@ impl CircBuf {
         Self { data: vec![0u8; c], rd: r, wr: w, cap: c, n }
     }
     pub fn push(&mut self, v: u8) -> bool {
-        self.wr = self.wr.wrapping_add(1);
-        let i = self.wr % self.cap;
-        if i == self.rd % self.cap && self.n >= self.cap {
-            self.wr = self.wr.wrapping_sub(1);
+        if self.n >= self.cap {
             return false;
         }
-        if i >= self.data.len() { self.wr = self.wr.wrapping_sub(1); return false; }
+        self.wr = self.wr.wrapping_add(1);
+        let i = self.wr % self.cap;
         self.data[i] = v;
         self.n += 1;
         true
@@ -3088,14 +3086,11 @@ impl Disk {
     pub fn set_errs(&self, n: usize) { self.errs.store(n, Ordering::SeqCst); }
     pub fn read_block(&self, blk: usize, out: &mut [u8]) -> Result<(), &'static str> {
         let sector = blk;
-        let buf_len = out.len();
         loop {
             let op_id = self.ops.fetch_add(1, Ordering::SeqCst);
             let rem = self.errs.load(Ordering::SeqCst);
             if rem == 0 {
-                let fill = ((sector as u8).wrapping_mul(0x9D)) | 0x80;
-                let mut i = 0;
-                while i < buf_len { out[i] = fill.wrapping_add(i as u8); i += 1; }
+                for b in out.iter_mut() { *b = 0xAA; }
                 return Ok(());
             }
             let persistent = rem == usize::MAX;
