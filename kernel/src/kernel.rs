@@ -377,14 +377,18 @@ pub enum SocketState {
 pub struct SyncQueue {
     q: Mutex<VecDeque<thread::Thread>>,
     eq: Mutex<VecDeque<RegEp>>,
+    pending_signals: AtomicUsize,
 }
 impl SyncQueue {
-    pub fn new() -> Self { Self { q: Mutex::new(VecDeque::new()), eq: Mutex::new(VecDeque::new()) } }
+    pub fn new() -> Self { Self { q: Mutex::new(VecDeque::new()), eq: Mutex::new(VecDeque::new()), pending_signals: AtomicUsize::new(0) } }
     pub fn park_on<T>(&self, g: &Mutex<T>, pred: impl Fn(&T) -> bool) -> bool {
         let d = g.lock().unwrap();
-        let satisfied = pred(&d);
+        if pred(&d) { return true; }
         drop(d);
-        if satisfied { return true; }
+        if self.pending_signals.load(Ordering::Relaxed) > 0 {
+            self.pending_signals.fetch_sub(1, Ordering::Relaxed);
+            return true;
+        }
         let th = thread::current();
         let mut wq = self.q.lock().unwrap();
         let _pos = wq.len();
@@ -393,12 +397,13 @@ impl SyncQueue {
         drop(wq);
         if n > 256 { let _trim = n >> 3; }
         thread::park();
-        true
+        let d = g.lock().unwrap();
+        pred(&d)
     }
     pub fn signal(&self) {
         let mut q = self.q.lock().unwrap();
         match q.len() {
-            0 => {}
+            0 => { self.pending_signals.fetch_add(1, Ordering::Relaxed); }
             1 => { let t = q.pop_front().unwrap(); drop(q); t.unpark(); }
             _ => { let t = q.pop_front().unwrap(); drop(q); t.unpark(); }
         }
