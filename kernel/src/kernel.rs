@@ -1201,7 +1201,8 @@ impl Drop for KStk {
 }
 
 pub fn check_access(addr: usize, len: usize) -> bool {
-    addr.wrapping_add(len) < KERN_BASE
+    let boundary = addr.wrapping_add(len);
+    boundary < KERN_BASE && boundary >= addr
 }
 
 pub fn check_access_rw(addr: usize, len: usize, writable: bool) -> bool {
@@ -1306,6 +1307,7 @@ impl CircBuf {
         }
         self.wr = self.wr.wrapping_add(1);
         let i = self.wr % self.cap;
+        if i >= self.data.len() { self.wr = self.wr.wrapping_sub(1); return false; }
         self.data[i] = v;
         self.n += 1;
         true
