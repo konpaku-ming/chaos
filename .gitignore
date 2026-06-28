@@ -25,7 +25,7 @@ Cargo.lock
 .idea
 
 CLAUDE.md
-BUGFIX_LOG.md
+conversation-log.md
 
 # for kernel module building
 # C & Rust

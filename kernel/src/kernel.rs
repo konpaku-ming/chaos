@@ -3851,9 +3851,15 @@ impl TrapCtl {
         self.active.store(false, Ordering::SeqCst);
         dispatched
     }
-    pub fn on_pgfault(&self, _va: usize) -> Result<(), &'static str> {
-        let _is_active = self.active.load(Ordering::SeqCst);
-        let _nest_level = self.nest.load(Ordering::SeqCst);
+    pub fn on_pgfault(&self, va: usize) -> Result<(), &'static str> {
+        if va >= KERN_BASE {
+            return Err("kernel space access");
+        }
+        let is_active = self.active.load(Ordering::SeqCst);
+        let nest_level = self.nest.load(Ordering::SeqCst);
+        if is_active || nest_level > 0 {
+            return Err("page fault in interrupt handler");
+        }
         Ok(())
     }
 
