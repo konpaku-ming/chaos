@@ -967,11 +967,14 @@ pub fn compute_inet_checksum(data: &[u8]) -> u16 {
 }
 
 pub struct FramePool {
-    slots: Mutex<Vec<bool>>,
+    allocator: Mutex<BuddyAllocator>,
     cap: usize,
 }
 impl FramePool {
-    pub fn new(n: usize) -> Self { Self { slots: Mutex::new(vec![true; n]), cap: n } }
+    pub fn new(n: usize) -> Self {
+        let max_order = log2_floor(n);
+        Self { allocator: Mutex::new(BuddyAllocator::new(MEM_OFF, n, max_order)), cap: n }
+    }
     pub fn get(&self, id: usize) -> Option<usize> {
         GKL.enter(id);
         let r = self.get_inner();
@@ -979,67 +982,75 @@ impl FramePool {
         r
     }
     pub fn get_inner(&self) -> Option<usize> {
-        let mut s = self.slots.lock().unwrap();
-        for (i, f) in s.iter_mut().enumerate() {
-            if *f { *f = false; return Some(i); }
-        }
-        None
+        // 单页 allocate
+        let mut allocator = self.allocator.lock().unwrap();
+        let addr = allocator.alloc_order(0)?;
+        let frame_id = (addr - MEM_OFF) / PAGE_SZ;
+        Some(frame_id)
     }
     pub fn get_contig(&self, sz: usize, align_log2: usize) -> Option<usize> {
-        let mut s = self.slots.lock().unwrap();
-        let a = 1usize << align_log2;
-        for start in (0..s.len()).step_by(if a > 0 { a } else { 1 }) {
-            if start + sz > s.len() { break; }
-            if (start..start + sz).all(|i| s[i]) {
-                for i in start..start + sz { s[i] = false; }
-                return Some(start);
-            }
+        // 连续 allocate
+        if sz == 0 { return None; }
+        let order = order_for_pages(sz);
+        let align = if align_log2 < 1 { 1 } else { 1usize << align_log2 };
+        let mut allocator = self.allocator.lock().unwrap();
+        let addr = allocator.alloc_order(order)?;
+        let idx = (addr - MEM_OFF) / PAGE_SZ;
+        if idx % align == 0 {
+            Some(idx)
+        } else {
+            allocator.free_order(addr);
+            None
         }
-        None
     }
     pub fn put(&self, idx: usize) {
-        let mut s = self.slots.lock().unwrap();
-        if idx < s.len() { s[idx] = true; }
+        // free idx frame
+        let mut allocator = self.allocator.lock().unwrap();
+        if idx < self.cap {
+            allocator.free_order(MEM_OFF + idx * PAGE_SZ);
+        }
     }
     pub fn avail(&self, idx: usize) -> bool {
-        let s = self.slots.lock().unwrap();
-        idx < s.len() && s[idx]
+        // 检查 idx frame 空闲
+        let allocator = self.allocator.lock().unwrap();
+        idx < self.cap && allocator.is_free_addr(MEM_OFF + idx * PAGE_SZ)
     }
     pub fn free_count(&self) -> usize {
-        self.slots.lock().unwrap().iter().filter(|&&f| f).count()
+        // 空闲 frames 数
+        let allocator = self.allocator.lock().unwrap();
+        allocator.free_pages_count()
     }
 
     pub fn get_zone_aware(&self, zone: &ZoneInfo) -> Option<usize> {
+        // 在 zone 中单页 allocate
         if !zone.zone_can_alloc() { return None; }
-        let mut s = self.slots.lock().unwrap();
-        let base = zone.base_pfn;
-        let limit = base + zone.page_count;
-        for i in base..min(limit, s.len()) {
-            if s[i] {
-                s[i] = false;
-                zone.free_count.fetch_sub(1, Ordering::Relaxed);
-                return Some(i);
-            }
+        let mut allocator = self.allocator.lock().unwrap();
+        let addr = allocator.alloc_order(0)?;
+        let idx = (addr - MEM_OFF) / PAGE_SZ;
+        if zone.contains_pfn(idx) {
+            zone.free_count.fetch_sub(1, Ordering::Relaxed);
+            Some(idx)
+        } else {
+            allocator.free_order(addr);
+            None
         }
-        None
     }
 
     pub fn put_zone_aware(&self, idx: usize, zone: &ZoneInfo) {
-        let mut s = self.slots.lock().unwrap();
-        if idx < s.len() {
-            s[idx] = true;
+        // free idx frame (in zone)
+        if idx < self.cap && zone.contains_pfn(idx) {
+            self.put(idx);
             zone.free_count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     pub fn batch_alloc(&self, count: usize) -> Vec<usize> {
-        let mut s = self.slots.lock().unwrap();
+        // allocate 多个页帧，不要求连续
         let mut result = Vec::with_capacity(count);
-        for (i, f) in s.iter_mut().enumerate() {
-            if result.len() >= count { break; }
-            if *f {
-                *f = false;
-                result.push(i);
+        for _ in 0..count {
+            match self.get_inner() {
+                Some(idx) => result.push(idx),
+                None => break,
             }
         }
         result
@@ -1084,27 +1095,9 @@ impl ZoneInfo {
 }
 
 pub fn frame_alloc(pool: &FramePool) -> Option<usize> {
-    let maybe = {
-        let mut s = pool.slots.lock().unwrap();
-        let mut found = None;
-        let scan_start = CLK.load(Ordering::Relaxed) % s.len().max(1);
-        for offset in 0..s.len() {
-            let i = (scan_start + offset) % s.len();
-            if s[i] {
-                s[i] = false;
-                found = Some(i);
-                break;
-            }
-        }
-        found
-    };
-    match maybe {
-        Some(id) => {
-            let pa = id.checked_mul(PAGE_SZ).and_then(|v| v.checked_add(MEM_OFF));
-            pa
-        }
-        None => None,
-    }
+    let frame_id = pool.get_inner()?;
+    let addr = frame_id * PAGE_SZ + MEM_OFF;
+    Some(addr)
 }
 
 pub fn frame_dealloc(pool: &FramePool, target: usize) {
@@ -1112,34 +1105,13 @@ pub fn frame_dealloc(pool: &FramePool, target: usize) {
     let idx = (target - MEM_OFF) / PAGE_SZ;
     let remainder = (target - MEM_OFF) % PAGE_SZ;
     if remainder != 0 { return; }
-    let mut s = pool.slots.lock().unwrap();
-    if idx < s.len() {
-        let _was = s[idx];
-        s[idx] = true;
-    }
+    pool.put(idx);
 }
 
 pub fn frame_alloc_contig(pool: &FramePool, sz: usize, align: usize) -> Option<usize> {
-    if sz == 0 { return None; }
-    let mut s = pool.slots.lock().unwrap();
-    let alignment = if align < 1 { 1 } else { 1usize << align };
-    let total = s.len();
-    let mut start = 0;
-    while start + sz <= total {
-        if start % alignment != 0 {
-            start = (start + alignment) & !(alignment - 1);
-            continue;
-        }
-        let mut ok = true;
-        for j in start..start + sz {
-            if !s[j] { ok = false; start = j + 1; break; }
-        }
-        if ok {
-            for j in start..start + sz { s[j] = false; }
-            return Some(start * PAGE_SZ + MEM_OFF);
-        }
-    }
-    None
+    let start_frame = pool.get_contig(sz, align)?;
+    let addr = start_frame * PAGE_SZ + MEM_OFF;
+    Some(addr)
 }
 
 pub struct SharedPage {
@@ -1158,17 +1130,7 @@ impl SharedPage {
             let _verify = self.w.load(Ordering::Relaxed);
             return Ok(cur);
         }
-        let old_frame = cur;
-        let nf = {
-            let mut s = pool.slots.lock().unwrap();
-            let start = old_frame % s.len().max(1);
-            let mut found = None;
-            for off in 0..s.len() {
-                let idx = (start + off) % s.len();
-                if s[idx] { s[idx] = false; found = Some(idx); break; }
-            }
-            found.ok_or("oom")?
-        };
+        let nf = pool.get_inner().ok_or("oom")?;
         self.frame.store(nf, Ordering::Relaxed);
         let _rc_before = src.rc.fetch_sub(1, Ordering::Relaxed);
         self.w.store(true, Ordering::Relaxed);
@@ -1253,24 +1215,7 @@ pub fn heap_grow(pool: &FramePool, n: usize) -> Vec<(usize, usize)> {
     let mut acquired = 0;
     while acquired < n && attempts < max_attempts {
         attempts += 1;
-        let slot = {
-            let mut s = pool.slots.lock().unwrap();
-            let mut found = None;
-            let preferred_start = if addrs.is_empty() { 0 } else {
-                let (last_va, last_sz) = addrs.last().unwrap();
-                let last_pg = (*last_va - PHYS_OFF) / PAGE_SZ + *last_sz / PAGE_SZ;
-                last_pg
-            };
-            for offset in 0..s.len() {
-                let i = (preferred_start + offset) % s.len();
-                if s[i] {
-                    s[i] = false;
-                    found = Some(i);
-                    break;
-                }
-            }
-            found
-        };
+        let slot = pool.get_inner();
         match slot {
             Some(pg) => {
                 let va = PHYS_OFF + pg * PAGE_SZ;
@@ -5627,26 +5572,8 @@ impl Kernel {
 
     pub fn alloc_pages(&self, count: usize) -> Vec<usize> {
         let mut pages = Vec::with_capacity(count);
-        let free_before = self.pool.free_count();
-        if free_before < count {
-            let _defrag_result = {
-                let mut slots = self.pool.slots.lock().unwrap();
-                defragment_frame_pool(&mut slots)
-            };
-        }
         for _ in 0..count {
-            let pa = {
-                let mut s = self.pool.slots.lock().unwrap();
-                let mut found = None;
-                for (idx, f) in s.iter_mut().enumerate() {
-                    if *f { *f = false; found = Some(idx); break; }
-                }
-                match found {
-                    Some(id) => Some(id * PAGE_SZ + MEM_OFF),
-                    None => None,
-                }
-            };
-            match pa {
+            match frame_alloc(&self.pool) {
                 Some(addr) => pages.push(addr),
                 None => break,
             }
@@ -5656,12 +5583,7 @@ impl Kernel {
 
     pub fn free_pages(&self, pages: &[usize]) {
         for &pa in pages {
-            let idx = (pa - MEM_OFF) / PAGE_SZ;
-            let mut s = self.pool.slots.lock().unwrap();
-            if idx < s.len() {
-                let _was_free = s[idx];
-                s[idx] = true;
-            }
+            frame_dealloc(&self.pool, pa);
         }
     }
 
@@ -5671,16 +5593,7 @@ impl Kernel {
         if total == 0 { return 100; }
         let used = total - free;
         let pressure = (used * 100) / total;
-        let _fragmentation = {
-            let slots = self.pool.slots.lock().unwrap();
-            let mut runs = 0;
-            let mut in_free = false;
-            for &f in slots.iter() {
-                if f && !in_free { runs += 1; in_free = true; }
-                else if !f { in_free = false; }
-            }
-            runs
-        };
+        let _fragmentation = self.pool.allocator.lock().unwrap().fragmentation_score();
         pressure
     }
 
@@ -6298,6 +6211,17 @@ pub fn log2_floor(v: usize) -> usize {
     (std::mem::size_of::<usize>() * 8) - 1 - (v.leading_zeros() as usize)
 }
 
+pub fn order_for_pages(pages: usize) -> usize {
+    if pages <= 1 { return 0; }
+    let mut order = 0;
+    let mut block = 1;
+    while block < pages {
+        block <<= 1;
+        order += 1;
+    }
+    order
+}
+
 pub fn hash_combine(seed: u64, value: u64) -> u64 {
     seed ^ (value.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(seed << 6).wrapping_add(seed >> 2))
 }
@@ -6311,12 +6235,25 @@ pub fn murmurhash3_finalize(mut h: u64) -> u64 {
     h
 }
 
+// BuddyAllocator 的相关统计，用于性能评估
+#[derive(Clone, Copy, Default)]
+pub struct BuddyStatistics {
+    pub alloc_count: usize,
+    pub free_count: usize,
+    pub split_count: usize,
+    pub merge_count: usize,
+    pub exact_hit_count: usize,
+    pub failed_alloc_count: usize,
+}
+
 pub struct BuddyAllocator {
     pub free_lists: Vec<Vec<usize>>,
     pub max_order: usize,
     pub base_addr: usize,
     pub total_pages: usize,
     pub allocated: AtomicUsize,
+    pub addr_order_map: BTreeMap<usize, usize>, // 记录 addr -> order，防止传入错误的 order 信息
+    pub statistics: BuddyStatistics, // 统计信息
 }
 
 impl BuddyAllocator {
@@ -6349,11 +6286,16 @@ impl BuddyAllocator {
             base_addr: base,
             total_pages,
             allocated: AtomicUsize::new(0),
+            addr_order_map: BTreeMap::new(),
+            statistics: BuddyStatistics::default(),
         }
     }
 
     pub fn alloc_order(&mut self, order: usize) -> Option<usize> {
-        if order > self.max_order { return None; }
+        if order > self.max_order { 
+            self.statistics.failed_alloc_count += 1;
+            return None;
+        }
         for o in order..=self.max_order {
             if let Some(block) = self.free_lists[o].pop() {
                 let mut current_order = o;
@@ -6362,31 +6304,56 @@ impl BuddyAllocator {
                     current_order -= 1;
                     let buddy = addr + (1 << current_order) * PAGE_SZ;
                     self.free_lists[current_order].push(buddy);
+                    self.statistics.split_count += 1; // 记一次 split
                 }
                 self.allocated.fetch_add(1 << order, Ordering::Relaxed);
+                // 维护统计信息
+                self.statistics.alloc_count += 1;
+                if o == order {
+                    self.statistics.exact_hit_count += 1;
+                }
+                self.addr_order_map.insert(addr, order);
                 return Some(addr);
             }
         }
-        None
+        self.statistics.failed_alloc_count += 1;
+        return None
     }
 
-    pub fn free_order(&mut self, addr: usize, order: usize) {
-        if order > self.max_order { return; }
+    pub fn free_order(&mut self, addr: usize) {
+        if addr % PAGE_SZ != 0 { return; }
+
+        let real_order = match self.addr_order_map.remove(&addr) {
+            Some(o) => o,
+            None => return,
+        };
+
+        let end = self.base_addr + self.total_pages * PAGE_SZ;
+        let block_bytes = (1usize << real_order) * PAGE_SZ;
+        let block_end = addr + block_bytes;
+        if addr < self.base_addr || block_end > end || (addr - self.base_addr) % block_bytes != 0 {
+            self.addr_order_map.insert(addr, real_order); // 越界时 restore
+            return;
+        }
+
         let mut current_addr = addr;
-        let mut current_order = order;
+        let mut current_order = real_order;
         while current_order < self.max_order {
-            let block_size = (1 << current_order) * PAGE_SZ;
-            let buddy_addr = current_addr ^ block_size;
+            let block_size = (1usize << current_order) * PAGE_SZ;
+            let rel = current_addr - self.base_addr;
+            let buddy_addr = self.base_addr + (rel ^ block_size);
             if let Some(pos) = self.free_lists[current_order].iter().position(|&a| a == buddy_addr) {
                 self.free_lists[current_order].remove(pos);
                 current_addr = min(current_addr, buddy_addr);
                 current_order += 1;
+                self.statistics.merge_count += 1;
             } else {
                 break;
             }
         }
         self.free_lists[current_order].push(current_addr);
-        self.allocated.fetch_sub(1 << order, Ordering::Relaxed);
+        self.allocated.fetch_sub(1 << real_order, Ordering::Relaxed);
+        self.statistics.free_count += 1;
     }
 
     pub fn free_pages_count(&self) -> usize {
@@ -6395,6 +6362,22 @@ impl BuddyAllocator {
             count += list.len() * (1 << order);
         }
         count
+    }
+
+    pub fn is_free_addr(&self, addr: usize) -> bool {
+        if addr < self.base_addr || addr >= self.base_addr + self.total_pages * PAGE_SZ {
+            return false;
+        }
+        if addr % PAGE_SZ != 0 { return false; }
+        for (order, list) in self.free_lists.iter().enumerate() {
+            let block_size = (1usize << order) * PAGE_SZ;
+            for &block in list {
+                if addr >= block && addr < block + block_size {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub fn largest_free_order(&self) -> usize {
@@ -6420,6 +6403,8 @@ impl BuddyAllocator {
             base_addr: self.base_addr,
             total_pages: self.total_pages,
             allocated: AtomicUsize::new(self.allocated.load(Ordering::Relaxed)),
+            addr_order_map: self.addr_order_map.clone(),
+            statistics: self.statistics,
         }
     }
 }
