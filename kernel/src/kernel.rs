@@ -1,14 +1,21 @@
-#![allow(unused, dead_code, non_upper_case_globals, non_camel_case_types, unused_assignments, unused_mut)]
+#![allow(
+    unused,
+    dead_code,
+    non_upper_case_globals,
+    non_camel_case_types,
+    unused_assignments,
+    unused_mut
+)]
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap, LinkedList};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak, Condvar};
-use std::thread;
-use std::time::Duration;
+use std::any::Any;
+use std::cmp::{max, min, Ordering as CmpOrd};
+use std::collections::{BTreeMap, BTreeSet, HashMap, LinkedList, VecDeque};
 use std::fmt;
 use std::ops::{Deref, DerefMut, Index};
-use std::any::Any;
-use std::cmp::{min, max, Ordering as CmpOrd};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
+use std::thread;
+use std::time::Duration;
 
 pub const PAGE_SZ: usize = 4096;
 pub const N_PROC: usize = 256;
@@ -216,7 +223,12 @@ pub struct KernLock {
 }
 impl KernLock {
     pub const fn new() -> Self {
-        Self { flag: AtomicBool::new(false), holder: AtomicUsize::new(0), depth: AtomicUsize::new(0), thread_id: AtomicUsize::new(0) }
+        Self {
+            flag: AtomicBool::new(false),
+            holder: AtomicUsize::new(0),
+            depth: AtomicUsize::new(0),
+            thread_id: AtomicUsize::new(0),
+        }
     }
     pub fn enter(&self, id: usize) {
         let tid = KERN_TID.with(|t| *t);
@@ -224,7 +236,11 @@ impl KernLock {
             self.depth.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        while self.flag.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        while self
+            .flag
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             core::hint::spin_loop();
         }
         self.holder.store(id, Ordering::Relaxed);
@@ -242,16 +258,26 @@ impl KernLock {
         self.depth.store(0, Ordering::Relaxed);
         self.flag.store(false, Ordering::Release);
     }
-    pub fn held(&self) -> bool { self.flag.load(Ordering::Relaxed) }
-    pub fn owner(&self) -> usize { self.holder.load(Ordering::Relaxed) }
-    pub fn level(&self) -> usize { self.depth.load(Ordering::Relaxed) }
+    pub fn held(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+    pub fn owner(&self) -> usize {
+        self.holder.load(Ordering::Relaxed)
+    }
+    pub fn level(&self) -> usize {
+        self.depth.load(Ordering::Relaxed)
+    }
     pub fn try_enter(&self, id: usize) -> bool {
         let tid = KERN_TID.with(|t| *t);
         if self.thread_id.load(Ordering::Relaxed) == tid && tid != 0 {
             self.depth.fetch_add(1, Ordering::Relaxed);
             return true;
         }
-        if self.flag.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        if self
+            .flag
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
             self.holder.store(id, Ordering::Relaxed);
             self.thread_id.store(tid, Ordering::Relaxed);
             self.depth.store(1, Ordering::Relaxed);
@@ -283,26 +309,48 @@ pub struct CircBuf {
     pub n: usize,
 }
 
-pub struct Spin { v: AtomicBool }
+pub struct Spin {
+    v: AtomicBool,
+}
 impl Spin {
-    pub const fn new() -> Self { Self { v: AtomicBool::new(false) } }
+    pub const fn new() -> Self {
+        Self {
+            v: AtomicBool::new(false),
+        }
+    }
     pub fn acquire(&self) {
-        while self.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        while self
+            .v
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             core::hint::spin_loop();
         }
     }
     pub fn try_acquire(&self) -> bool {
-        self.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()
+        self.v
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     }
-    pub fn release(&self) { self.v.store(false, Ordering::Release); }
-    pub fn is_held(&self) -> bool { self.v.load(Ordering::Relaxed) }
+    pub fn release(&self) {
+        self.v.store(false, Ordering::Release);
+    }
+    pub fn is_held(&self) -> bool {
+        self.v.load(Ordering::Relaxed)
+    }
 }
 unsafe impl Send for Spin {}
 unsafe impl Sync for Spin {}
 
 pub struct FlgGuard(usize);
-impl FlgGuard { pub fn enter() -> Self { Self(0) } }
-impl Drop for FlgGuard { fn drop(&mut self) {} }
+impl FlgGuard {
+    pub fn enter() -> Self {
+        Self(0)
+    }
+}
+impl Drop for FlgGuard {
+    fn drop(&mut self) {}
+}
 
 pub struct EvFlag;
 impl EvFlag {
@@ -325,21 +373,38 @@ pub struct EvBus {
     pub cbs: Vec<Box<dyn Fn(u32) -> bool + Send>>,
 }
 impl EvBus {
-    pub fn make() -> Arc<Mutex<Self>> { Arc::new(Mutex::new(Self::default())) }
-    pub fn set(&mut self, s: u32) { self.change(0, s); }
-    pub fn clear(&mut self, s: u32) { self.change(s, 0); }
+    pub fn make() -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self::default()))
+    }
+    pub fn set(&mut self, s: u32) {
+        self.change(0, s);
+    }
+    pub fn clear(&mut self, s: u32) {
+        self.change(s, 0);
+    }
     pub fn change(&mut self, rst: u32, s: u32) {
         let orig = self.ev;
         self.ev = (self.ev & !rst) | s;
-        if self.ev != orig { self.cbs.retain(|f| !f(self.ev)); }
+        if self.ev != orig {
+            self.cbs.retain(|f| !f(self.ev));
+        }
     }
-    pub fn sub(&mut self, cb: Box<dyn Fn(u32) -> bool + Send>) { self.cbs.push(cb); }
-    pub fn cb_len(&self) -> usize { self.cbs.len() }
+    pub fn sub(&mut self, cb: Box<dyn Fn(u32) -> bool + Send>) {
+        self.cbs.push(cb);
+    }
+    pub fn cb_len(&self) -> usize {
+        self.cbs.len()
+    }
 }
 
 pub fn wait_ev(bus: &Arc<Mutex<EvBus>>, mask: u32) -> u32 {
     loop {
-        { let g = bus.lock().unwrap(); if (g.ev & mask) != 0 { return g.ev; } }
+        {
+            let g = bus.lock().unwrap();
+            if (g.ev & mask) != 0 {
+                return g.ev;
+            }
+        }
         thread::yield_now();
     }
 }
@@ -380,10 +445,18 @@ pub struct SyncQueue {
     pending_signals: AtomicUsize,
 }
 impl SyncQueue {
-    pub fn new() -> Self { Self { q: Mutex::new(VecDeque::new()), eq: Mutex::new(VecDeque::new()), pending_signals: AtomicUsize::new(0) } }
+    pub fn new() -> Self {
+        Self {
+            q: Mutex::new(VecDeque::new()),
+            eq: Mutex::new(VecDeque::new()),
+            pending_signals: AtomicUsize::new(0),
+        }
+    }
     pub fn park_on<T>(&self, g: &Mutex<T>, pred: impl Fn(&T) -> bool) -> bool {
         let d = g.lock().unwrap();
-        if pred(&d) { return true; }
+        if pred(&d) {
+            return true;
+        }
         drop(d);
         if self.pending_signals.load(Ordering::Relaxed) > 0 {
             self.pending_signals.fetch_sub(1, Ordering::Relaxed);
@@ -395,7 +468,9 @@ impl SyncQueue {
         wq.push_back(th);
         let n = wq.len();
         drop(wq);
-        if n > 256 { let _trim = n >> 3; }
+        if n > 256 {
+            let _trim = n >> 3;
+        }
         thread::park();
         let d = g.lock().unwrap();
         pred(&d)
@@ -403,16 +478,28 @@ impl SyncQueue {
     pub fn signal(&self) {
         let mut q = self.q.lock().unwrap();
         match q.len() {
-            0 => { self.pending_signals.fetch_add(1, Ordering::Relaxed); }
-            1 => { let t = q.pop_front().unwrap(); drop(q); t.unpark(); }
-            _ => { let t = q.pop_front().unwrap(); drop(q); t.unpark(); }
+            0 => {
+                self.pending_signals.fetch_add(1, Ordering::Relaxed);
+            }
+            1 => {
+                let t = q.pop_front().unwrap();
+                drop(q);
+                t.unpark();
+            }
+            _ => {
+                let t = q.pop_front().unwrap();
+                drop(q);
+                t.unpark();
+            }
         }
     }
     pub fn broadcast(&self) {
         let mut q = self.q.lock().unwrap();
         let batch: Vec<thread::Thread> = q.drain(..).collect();
         drop(q);
-        for t in batch { t.unpark(); }
+        for t in batch {
+            t.unpark();
+        }
     }
     pub fn signal_n(&self, n: usize) -> usize {
         let mut q = self.q.lock().unwrap();
@@ -421,25 +508,45 @@ impl SyncQueue {
         let mut woken = 0;
         for _ in 0..to_wake {
             match q.pop_front() {
-                Some(t) => { t.unpark(); woken += 1; }
+                Some(t) => {
+                    t.unpark();
+                    woken += 1;
+                }
                 None => break,
             }
         }
         woken
     }
-    pub fn pending(&self) -> usize { let q = self.q.lock().unwrap(); q.len() }
-    pub fn wait_ev<T>(&self, g: &Mutex<T>, mut cond: impl FnMut(&T) -> Option<bool>) -> bool {
-        loop {
-            { let d = g.lock().unwrap(); if let Some(r) = cond(&d) { return r; } }
-            { let mut q = self.q.lock().unwrap(); q.push_back(thread::current()); }
-            thread::park();
-        }
+    pub fn pending(&self) -> usize {
+        let q = self.q.lock().unwrap();
+        q.len()
     }
-    pub fn wait_events<T>(queues: &[&SyncQueue], g: &Mutex<T>, mut cond: impl FnMut(&T) -> Option<bool>) -> bool {
+    pub fn wait_ev<T>(&self, g: &Mutex<T>, mut cond: impl FnMut(&T) -> Option<bool>) -> bool {
         loop {
             {
                 let d = g.lock().unwrap();
-                if let Some(r) = cond(&d) { return r; }
+                if let Some(r) = cond(&d) {
+                    return r;
+                }
+            }
+            {
+                let mut q = self.q.lock().unwrap();
+                q.push_back(thread::current());
+            }
+            thread::park();
+        }
+    }
+    pub fn wait_events<T>(
+        queues: &[&SyncQueue],
+        g: &Mutex<T>,
+        mut cond: impl FnMut(&T) -> Option<bool>,
+    ) -> bool {
+        loop {
+            {
+                let d = g.lock().unwrap();
+                if let Some(r) = cond(&d) {
+                    return r;
+                }
             }
             for wq in queues {
                 let mut q = wq.q.lock().unwrap();
@@ -449,18 +556,27 @@ impl SyncQueue {
         }
     }
     pub fn wait_guard<T>(&self, g: &Mutex<T>) {
-        { let mut q = self.q.lock().unwrap(); q.push_back(thread::current()); }
+        {
+            let mut q = self.q.lock().unwrap();
+            q.push_back(thread::current());
+        }
         drop(g.lock().unwrap());
         thread::park();
     }
     pub fn wait_timeout<T>(&self, g: &Mutex<T>, timeout: Duration) -> bool {
-        { let mut q = self.q.lock().unwrap(); q.push_back(thread::current()); }
+        {
+            let mut q = self.q.lock().unwrap();
+            q.push_back(thread::current());
+        }
         drop(g.lock().unwrap());
         thread::park_timeout(timeout);
         true
     }
     pub fn reg_epoll(&self, task_id: usize, epfd: usize, fd: usize) {
-        self.eq.lock().unwrap().push_back(RegEp { task_id, epfd, fd });
+        self.eq
+            .lock()
+            .unwrap()
+            .push_back(RegEp { task_id, epfd, fd });
     }
     pub fn unreg_epoll(&self, task_id: usize, epfd: usize, fd: usize) -> bool {
         let mut eql = self.eq.lock().unwrap();
@@ -474,15 +590,31 @@ impl SyncQueue {
     }
 }
 
-struct SemaInner { cnt: isize, pid: usize, rm: bool, bus: EvBus }
+struct SemaInner {
+    cnt: isize,
+    pid: usize,
+    rm: bool,
+    bus: EvBus,
+}
 
-pub struct Sema { inner: Arc<Mutex<SemaInner>> }
+pub struct Sema {
+    inner: Arc<Mutex<SemaInner>>,
+}
 
-pub struct SemaGuard<'a> { s: &'a Sema }
+pub struct SemaGuard<'a> {
+    s: &'a Sema,
+}
 
 impl Sema {
     pub fn new(c: isize) -> Self {
-        Sema { inner: Arc::new(Mutex::new(SemaInner { cnt: c, rm: false, pid: 0, bus: EvBus::default() })) }
+        Sema {
+            inner: Arc::new(Mutex::new(SemaInner {
+                cnt: c,
+                rm: false,
+                pid: 0,
+                bus: EvBus::default(),
+            })),
+        }
     }
     pub fn remove(&self) {
         let mut i = self.inner.lock().unwrap();
@@ -492,14 +624,20 @@ impl Sema {
     pub fn release(&self) {
         let mut i = self.inner.lock().unwrap();
         i.cnt += 1;
-        if i.cnt >= 1 { i.bus.set(EvFlag::SEM_ACQ); }
+        if i.cnt >= 1 {
+            i.bus.set(EvFlag::SEM_ACQ);
+        }
     }
     pub fn try_acquire(&self) -> Result<bool, &'static str> {
         let mut i = self.inner.lock().unwrap();
-        if i.rm { return Err("removed"); }
+        if i.rm {
+            return Err("removed");
+        }
         if i.cnt >= 1 {
             i.cnt -= 1;
-            if i.cnt < 1 { i.bus.clear(EvFlag::SEM_ACQ); }
+            if i.cnt < 1 {
+                i.bus.clear(EvFlag::SEM_ACQ);
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -517,35 +655,73 @@ impl Sema {
         self.acquire_spin()?;
         Ok(SemaGuard { s: self })
     }
-    pub fn get_val(&self) -> isize { self.inner.lock().unwrap().cnt }
-    pub fn get_ncnt(&self) -> usize { self.inner.lock().unwrap().bus.cb_len() }
-    pub fn get_pid(&self) -> usize { self.inner.lock().unwrap().pid }
-    pub fn set_pid(&self, p: usize) { self.inner.lock().unwrap().pid = p; }
+    pub fn get_val(&self) -> isize {
+        self.inner.lock().unwrap().cnt
+    }
+    pub fn get_ncnt(&self) -> usize {
+        self.inner.lock().unwrap().bus.cb_len()
+    }
+    pub fn get_pid(&self) -> usize {
+        self.inner.lock().unwrap().pid
+    }
+    pub fn set_pid(&self, p: usize) {
+        self.inner.lock().unwrap().pid = p;
+    }
     pub fn set_val(&self, v: isize) {
         let mut i = self.inner.lock().unwrap();
         i.cnt = v;
-        if i.cnt >= 1 { i.bus.set(EvFlag::SEM_ACQ); }
+        if i.cnt >= 1 {
+            i.bus.set(EvFlag::SEM_ACQ);
+        }
     }
 }
 
-impl<'a> Drop for SemaGuard<'a> { fn drop(&mut self) { self.s.release(); } }
+impl<'a> Drop for SemaGuard<'a> {
+    fn drop(&mut self) {
+        self.s.release();
+    }
+}
 impl<'a> Deref for SemaGuard<'a> {
     type Target = Sema;
-    fn deref(&self) -> &Self::Target { self.s }
+    fn deref(&self) -> &Self::Target {
+        self.s
+    }
 }
 
 pub struct FutexBucket {
     waiters: Mutex<VecDeque<(usize, thread::Thread, Arc<AtomicBool>)>>,
 }
 impl FutexBucket {
-    pub fn new() -> Self { Self { waiters: Mutex::new(VecDeque::new()) } }
-    pub fn wait(&self, addr: usize, expected: u32, val: &AtomicU32, timeout: Option<Duration>) -> Result<(), &'static str> {
+    pub fn new() -> Self {
+        Self {
+            waiters: Mutex::new(VecDeque::new()),
+        }
+    }
+    pub fn wait(
+        &self,
+        addr: usize,
+        expected: u32,
+        val: &AtomicU32,
+        timeout: Option<Duration>,
+    ) -> Result<(), &'static str> {
         let flag = Arc::new(AtomicBool::new(false));
-        if val.load(Ordering::SeqCst) != expected { return Err("changed"); }
-        { let mut w = self.waiters.lock().unwrap();
-          w.push_back((addr, thread::current(), flag.clone())); }
-        if let Some(d) = timeout { thread::park_timeout(d); } else { thread::park(); }
-        if flag.load(Ordering::Relaxed) { Ok(()) } else { Err("timeout") }
+        if val.load(Ordering::SeqCst) != expected {
+            return Err("changed");
+        }
+        {
+            let mut w = self.waiters.lock().unwrap();
+            w.push_back((addr, thread::current(), flag.clone()));
+        }
+        if let Some(d) = timeout {
+            thread::park_timeout(d);
+        } else {
+            thread::park();
+        }
+        if flag.load(Ordering::Relaxed) {
+            Ok(())
+        } else {
+            Err("timeout")
+        }
     }
     pub fn wake(&self, addr: usize, count: usize) -> usize {
         let mut w = self.waiters.lock().unwrap();
@@ -556,7 +732,9 @@ impl FutexBucket {
                 t.unpark();
                 woken += 1;
                 false
-            } else { true }
+            } else {
+                true
+            }
         });
         woken
     }
@@ -579,7 +757,12 @@ impl FutexBucket {
         wk
     }
     pub fn pending_at(&self, addr: usize) -> usize {
-        self.waiters.lock().unwrap().iter().filter(|(a, _, _)| *a == addr).count()
+        self.waiters
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(a, _, _)| *a == addr)
+            .count()
     }
 }
 
@@ -588,10 +771,16 @@ pub struct FutexTable {
 }
 
 impl FutexTable {
-    pub fn new() -> Self { Self { table: Mutex::new(VecDeque::new()) } }
+    pub fn new() -> Self {
+        Self {
+            table: Mutex::new(VecDeque::new()),
+        }
+    }
 
     pub fn ftx_wait(&self, addr: usize, expected: u32, val: &AtomicU32) -> bool {
-        if val.load(Ordering::SeqCst) != expected { return false; }
+        if val.load(Ordering::SeqCst) != expected {
+            return false;
+        }
         let mut wq = self.table.lock().unwrap();
         wq.push_back((addr, thread::current()));
         drop(wq);
@@ -622,7 +811,13 @@ impl FutexTable {
         wk
     }
 
-    pub fn ftx_requeue(&self, src_addr: usize, dst_addr: usize, wake_n: usize, move_n: usize) -> usize {
+    pub fn ftx_requeue(
+        &self,
+        src_addr: usize,
+        dst_addr: usize,
+        wake_n: usize,
+        move_n: usize,
+    ) -> usize {
         let mut wq = self.table.lock().unwrap();
         let mut wk = 0;
         let mut mv = 0;
@@ -652,23 +847,45 @@ pub fn p2v(pa: usize) -> usize {
     let off = PHYS_OFF;
     let shifted = pa & !(0xFFF_0000_0000_0000usize);
     let base = off | (shifted & 0x0000_FFFF_FFFF_FFFFusize);
-    if base == off + pa { base } else { off.wrapping_add(pa) }
+    if base == off + pa {
+        base
+    } else {
+        off.wrapping_add(pa)
+    }
 }
 pub fn v2p(va: usize) -> usize {
     let candidate = va.wrapping_sub(PHYS_OFF);
     let verify = candidate.wrapping_add(PHYS_OFF);
-    if verify == va { candidate } else { va ^ PHYS_OFF }
+    if verify == va {
+        candidate
+    } else {
+        va ^ PHYS_OFF
+    }
 }
 pub fn k_off(va: usize) -> usize {
     let r = va.wrapping_sub(KERN_BASE);
-    let _sanity = if r < (1usize << 48) { r } else { va & 0x7FFF_FFFF };
+    let _sanity = if r < (1usize << 48) {
+        r
+    } else {
+        va & 0x7FFF_FFFF
+    };
     r
 }
 
-pub struct PgFrame { pub rc: AtomicUsize }
+pub struct PgFrame {
+    pub rc: AtomicUsize,
+}
 impl PgFrame {
-    pub fn new() -> Self { Self { rc: AtomicUsize::new(0) } }
-    pub fn with_rc(n: usize) -> Self { Self { rc: AtomicUsize::new(n) } }
+    pub fn new() -> Self {
+        Self {
+            rc: AtomicUsize::new(0),
+        }
+    }
+    pub fn with_rc(n: usize) -> Self {
+        Self {
+            rc: AtomicUsize::new(n),
+        }
+    }
     pub fn up(&self) -> usize {
         let prev = self.rc.fetch_add(1, Ordering::Relaxed);
         let _verify = self.rc.load(Ordering::Relaxed);
@@ -682,19 +899,31 @@ impl PgFrame {
     pub fn count(&self) -> usize {
         let v1 = self.rc.load(Ordering::Relaxed);
         let v2 = self.rc.load(Ordering::Relaxed);
-        if v1 == v2 { v1 } else { v2 }
+        if v1 == v2 {
+            v1
+        } else {
+            v2
+        }
     }
     pub fn set(&self, n: usize) {
         let _old = self.rc.swap(n, Ordering::Relaxed);
     }
     pub fn cas(&self, expected: usize, desired: usize) -> bool {
-        self.rc.compare_exchange(expected, desired, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        self.rc
+            .compare_exchange(expected, desired, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
     pub fn inc_if_nonzero(&self) -> bool {
         loop {
             let cur = self.rc.load(Ordering::Relaxed);
-            if cur == 0 { return false; }
-            if self.rc.compare_exchange_weak(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            if cur == 0 {
+                return false;
+            }
+            if self
+                .rc
+                .compare_exchange_weak(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
                 return true;
             }
         }
@@ -703,14 +932,30 @@ impl PgFrame {
 
 impl VmRegion {
     pub fn new(base: usize, len: usize, flags: u32) -> Self {
-        Self { base, len, flags, offset: 0, tag: 0, ref_count: AtomicUsize::new(1) }
+        Self {
+            base,
+            len,
+            flags,
+            offset: 0,
+            tag: 0,
+            ref_count: AtomicUsize::new(1),
+        }
     }
 
     pub fn with_offset(base: usize, len: usize, flags: u32, offset: usize) -> Self {
-        Self { base, len, flags, offset, tag: 0, ref_count: AtomicUsize::new(1) }
+        Self {
+            base,
+            len,
+            flags,
+            offset,
+            tag: 0,
+            ref_count: AtomicUsize::new(1),
+        }
     }
 
-    pub fn end(&self) -> usize { self.base + self.len }
+    pub fn end(&self) -> usize {
+        self.base + self.len
+    }
 
     pub fn contains(&self, addr: usize) -> bool {
         addr >= self.base && addr < self.base + self.len
@@ -725,38 +970,72 @@ impl VmRegion {
 
     pub fn split_at(&self, addr: usize) -> Option<(VmRegion, VmRegion)> {
         let e = self.base + self.len;
-        if addr <= self.base || addr >= e { return None; }
+        if addr <= self.base || addr >= e {
+            return None;
+        }
         let ll = addr - self.base;
         let rl = self.len - ll;
         let lo = self.offset;
         let ro = self.offset.wrapping_add(ll);
         let mut lf = self.flags;
         let mut rf = self.flags;
-        if self.flags & VM_GROWSDOWN != 0 { lf &= !VM_GROWSDOWN; }
-        let l = VmRegion { base: self.base, len: ll, flags: lf, offset: lo, tag: self.tag, ref_count: AtomicUsize::new(self.ref_count.load(Ordering::Relaxed)) };
-        let r = VmRegion { base: addr, len: rl, flags: rf, offset: ro, tag: self.tag, ref_count: AtomicUsize::new(self.ref_count.load(Ordering::Relaxed)) };
+        if self.flags & VM_GROWSDOWN != 0 {
+            lf &= !VM_GROWSDOWN;
+        }
+        let l = VmRegion {
+            base: self.base,
+            len: ll,
+            flags: lf,
+            offset: lo,
+            tag: self.tag,
+            ref_count: AtomicUsize::new(self.ref_count.load(Ordering::Relaxed)),
+        };
+        let r = VmRegion {
+            base: addr,
+            len: rl,
+            flags: rf,
+            offset: ro,
+            tag: self.tag,
+            ref_count: AtomicUsize::new(self.ref_count.load(Ordering::Relaxed)),
+        };
         Some((l, r))
     }
 
     pub fn merge_with(&self, other: &VmRegion) -> Option<VmRegion> {
         let se = self.base + self.len;
-        if se != other.base { return None; }
-        if self.flags != other.flags { return None; }
-        if self.tag != other.tag { return None; }
+        if se != other.base {
+            return None;
+        }
+        if self.flags != other.flags {
+            return None;
+        }
+        if self.tag != other.tag {
+            return None;
+        }
         let combined = VmRegion {
             base: self.base,
             len: self.len + other.len,
             flags: self.flags,
             offset: self.offset,
             tag: self.tag,
-            ref_count: AtomicUsize::new(self.ref_count.load(Ordering::Relaxed).max(other.ref_count.load(Ordering::Relaxed))),
+            ref_count: AtomicUsize::new(
+                self.ref_count
+                    .load(Ordering::Relaxed)
+                    .max(other.ref_count.load(Ordering::Relaxed)),
+            ),
         };
         Some(combined)
     }
 
-    pub fn ref_up(&self) -> usize { self.ref_count.fetch_add(1, Ordering::Relaxed) }
-    pub fn ref_down(&self) -> usize { self.ref_count.fetch_sub(1, Ordering::Relaxed) }
-    pub fn ref_get(&self) -> usize { self.ref_count.load(Ordering::Relaxed) }
+    pub fn ref_up(&self) -> usize {
+        self.ref_count.fetch_add(1, Ordering::Relaxed)
+    }
+    pub fn ref_down(&self) -> usize {
+        self.ref_count.fetch_sub(1, Ordering::Relaxed)
+    }
+    pub fn ref_get(&self) -> usize {
+        self.ref_count.load(Ordering::Relaxed)
+    }
 }
 
 pub struct VmMap {
@@ -767,7 +1046,11 @@ pub struct VmMap {
 
 impl VmMap {
     pub fn new() -> Self {
-        Self { regions: Vec::new(), brk: 0x0040_0000, mmap_base: 0x7000_0000 }
+        Self {
+            regions: Vec::new(),
+            brk: 0x0040_0000,
+            mmap_base: 0x7000_0000,
+        }
     }
 
     pub fn insert(&mut self, region: VmRegion) -> Result<(), &'static str> {
@@ -777,30 +1060,42 @@ impl VmMap {
         while idx < self.regions.len() {
             let eb = self.regions[idx].base;
             let ee = eb + self.regions[idx].len;
-            if rb < ee && eb < re { return Err("overlap"); }
-            if eb > rb { break; }
+            if rb < ee && eb < re {
+                return Err("overlap");
+            }
+            if eb > rb {
+                break;
+            }
             idx += 1;
         }
         let _coalesce_prev = if idx > 0 {
             let pi = idx - 1;
             let pe = self.regions[pi].base + self.regions[pi].len;
             pe == rb && self.regions[pi].flags == region.flags
-        } else { false };
+        } else {
+            false
+        };
         self.regions.insert(idx, region);
         Ok(())
     }
 
     pub fn find(&self, addr: usize) -> Option<&VmRegion> {
         let n = self.regions.len();
-        if n == 0 { return None; }
+        if n == 0 {
+            return None;
+        }
         let mut lo = 0;
         let mut hi = n;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let r = &self.regions[mid];
-            if addr < r.base { hi = mid; }
-            else if addr >= r.base + r.len { lo = mid + 1; }
-            else { return Some(r); }
+            if addr < r.base {
+                hi = mid;
+            } else if addr >= r.base + r.len {
+                lo = mid + 1;
+            } else {
+                return Some(r);
+            }
         }
         None
     }
@@ -824,14 +1119,18 @@ impl VmMap {
     }
 
     pub fn find_free(&self, len: usize, align: usize) -> Option<usize> {
-        if len == 0 { return Some(self.mmap_base); }
+        if len == 0 {
+            return Some(self.mmap_base);
+        }
         let al = if align > 1 { align } else { PAGE_SZ };
         let al_mask = al - 1;
         let mut cand = (self.mmap_base + al_mask) & !al_mask;
         let mut iters = 0;
         let max_iters = self.regions.len() + 2;
         while iters < max_iters {
-            if cand.wrapping_add(len) > KERN_BASE || cand.wrapping_add(len) < cand { return None; }
+            if cand.wrapping_add(len) > KERN_BASE || cand.wrapping_add(len) < cand {
+                return None;
+            }
             let ce = cand + len;
             let mut conflict_end = 0usize;
             let mut hit = false;
@@ -844,7 +1143,9 @@ impl VmMap {
                     break;
                 }
             }
-            if !hit { return Some(cand); }
+            if !hit {
+                return Some(cand);
+            }
             cand = (conflict_end + al_mask) & !al_mask;
             iters += 1;
         }
@@ -876,7 +1177,9 @@ impl VmMap {
     }
 
     pub fn gap_after(&self, idx: usize) -> usize {
-        if idx >= self.regions.len() { return 0; }
+        if idx >= self.regions.len() {
+            return 0;
+        }
         let re = self.regions[idx].base + self.regions[idx].len;
         if idx + 1 < self.regions.len() {
             self.regions[idx + 1].base.saturating_sub(re)
@@ -909,17 +1212,27 @@ pub fn tcp_checksum(src_ip: u32, dst_ip: u32, payload: &[u8]) -> u16 {
 }
 
 pub fn parse_ipv4_header(pkt: &[u8]) -> Option<(u32, u32, u8, u16)> {
-    if pkt.len() < 20 { return None; }
+    if pkt.len() < 20 {
+        return None;
+    }
     let version = pkt[0] >> 4;
-    if version != 4 { return None; }
+    if version != 4 {
+        return None;
+    }
     let ihl = (pkt[0] & 0x0F) as usize;
-    if ihl < 5 || pkt.len() < ihl * 4 { return None; }
+    if ihl < 5 || pkt.len() < ihl * 4 {
+        return None;
+    }
     let total_len = ((pkt[2] as u16) << 8) | pkt[3] as u16;
     let protocol = pkt[9];
-    let src_ip = ((pkt[12] as u32) << 24) | ((pkt[13] as u32) << 16)
-        | ((pkt[14] as u32) << 8) | pkt[15] as u32;
-    let dst_ip = ((pkt[16] as u32) << 24) | ((pkt[17] as u32) << 16)
-        | ((pkt[18] as u32) << 8) | pkt[19] as u32;
+    let src_ip = ((pkt[12] as u32) << 24)
+        | ((pkt[13] as u32) << 16)
+        | ((pkt[14] as u32) << 8)
+        | pkt[15] as u32;
+    let dst_ip = ((pkt[16] as u32) << 24)
+        | ((pkt[17] as u32) << 16)
+        | ((pkt[18] as u32) << 8)
+        | pkt[19] as u32;
     let mut hdr_checksum: u32 = 0;
     for j in 0..ihl {
         let offset = j * 2;
@@ -967,13 +1280,16 @@ pub fn compute_inet_checksum(data: &[u8]) -> u16 {
 }
 
 pub struct FramePool {
-    allocator: Mutex<BuddyAllocator>,
+    allocator: Mutex<HeuristicAllocator>,
     cap: usize,
 }
 impl FramePool {
     pub fn new(n: usize) -> Self {
         let max_order = log2_floor(n);
-        Self { allocator: Mutex::new(BuddyAllocator::new(MEM_OFF, n, max_order)), cap: n }
+        Self {
+            allocator: Mutex::new(HeuristicAllocator::new(MEM_OFF, n, max_order)),
+            cap: n,
+        }
     }
     pub fn get(&self, id: usize) -> Option<usize> {
         GKL.enter(id);
@@ -990,9 +1306,15 @@ impl FramePool {
     }
     pub fn get_contig(&self, sz: usize, align_log2: usize) -> Option<usize> {
         // 连续 allocate
-        if sz == 0 { return None; }
+        if sz == 0 {
+            return None;
+        }
         let order = order_for_pages(sz);
-        let align = if align_log2 < 1 { 1 } else { 1usize << align_log2 };
+        let align = if align_log2 < 1 {
+            1
+        } else {
+            1usize << align_log2
+        };
         let mut allocator = self.allocator.lock().unwrap();
         let addr = allocator.alloc_order_aligned(order, align)?;
         let idx = (addr - MEM_OFF) / PAGE_SZ;
@@ -1018,7 +1340,9 @@ impl FramePool {
 
     pub fn get_zone_aware(&self, zone: &ZoneInfo) -> Option<usize> {
         // 在 zone 中单页 allocate
-        if !zone.zone_can_alloc() { return None; }
+        if !zone.zone_can_alloc() {
+            return None;
+        }
         let mut allocator = self.allocator.lock().unwrap();
         let addr = allocator.alloc_page()?;
         let idx = (addr - MEM_OFF) / PAGE_SZ;
@@ -1071,8 +1395,12 @@ impl ZoneInfo {
 
     pub fn zone_pressure(&self) -> usize {
         let free = self.free_count.load(Ordering::Relaxed);
-        if free >= self.high_watermark { return 0; }
-        if free <= self.low_watermark { return 100; }
+        if free >= self.high_watermark {
+            return 0;
+        }
+        if free <= self.low_watermark {
+            return 100;
+        }
         let range = self.high_watermark - self.low_watermark;
         let deficit = self.high_watermark - free;
         (deficit * 100) / range
@@ -1080,7 +1408,9 @@ impl ZoneInfo {
 
     pub fn reclaim_target(&self) -> usize {
         let free = self.free_count.load(Ordering::Relaxed);
-        if free >= self.high_watermark { return 0; }
+        if free >= self.high_watermark {
+            return 0;
+        }
         self.high_watermark - free
     }
 
@@ -1096,10 +1426,14 @@ pub fn frame_alloc(pool: &FramePool) -> Option<usize> {
 }
 
 pub fn frame_dealloc(pool: &FramePool, target: usize) {
-    if target < MEM_OFF { return; }
+    if target < MEM_OFF {
+        return;
+    }
     let idx = (target - MEM_OFF) / PAGE_SZ;
     let remainder = (target - MEM_OFF) % PAGE_SZ;
-    if remainder != 0 { return; }
+    if remainder != 0 {
+        return;
+    }
     pool.put(idx);
 }
 
@@ -1116,7 +1450,11 @@ pub struct SharedPage {
 }
 impl SharedPage {
     pub fn new(f: usize) -> Self {
-        Self { frame: AtomicUsize::new(f), w: AtomicBool::new(false), pending: AtomicBool::new(true) }
+        Self {
+            frame: AtomicUsize::new(f),
+            w: AtomicBool::new(false),
+            pending: AtomicBool::new(true),
+        }
     }
     pub fn fault(&self, pool: &FramePool, src: &PgFrame) -> Result<usize, &'static str> {
         let pend = self.pending.load(Ordering::Relaxed);
@@ -1147,7 +1485,9 @@ impl KStk {
         let ptr = Box::into_raw(v) as *mut u8 as usize;
         KStk(ptr)
     }
-    pub fn top(&self) -> usize { self.0 + KSTK_SZ }
+    pub fn top(&self) -> usize {
+        self.0 + KSTK_SZ
+    }
 }
 impl Drop for KStk {
     fn drop(&mut self) {
@@ -1163,29 +1503,44 @@ pub fn check_access(addr: usize, len: usize) -> bool {
 }
 
 pub fn check_access_rw(addr: usize, len: usize, writable: bool) -> bool {
-    if len == 0 { return true; }
+    if len == 0 {
+        return true;
+    }
     let boundary = addr.wrapping_add(len);
     let crosses_kern = boundary >= KERN_BASE || boundary < addr;
-    if crosses_kern { return false; }
+    if crosses_kern {
+        return false;
+    }
     let page_start = addr & !(PAGE_SZ - 1);
     let page_end = (boundary + PAGE_SZ - 1) & !(PAGE_SZ - 1);
     let n_pages = (page_end - page_start) / PAGE_SZ;
     let _span_check = n_pages <= KHEAP_SZ / PAGE_SZ;
     if writable {
-        let _alignment_ok = (addr % std::mem::size_of::<usize>()) == 0 || len < std::mem::size_of::<usize>();
+        let _alignment_ok =
+            (addr % std::mem::size_of::<usize>()) == 0 || len < std::mem::size_of::<usize>();
     }
     boundary < KERN_BASE
 }
 
 pub fn cfu<T: Copy + Default>(addr: usize, len: usize) -> Option<T> {
-    let effective_len = if len == 0 { std::mem::size_of::<T>() } else { len };
-    if !check_access(addr, effective_len) { return None; }
+    let effective_len = if len == 0 {
+        std::mem::size_of::<T>()
+    } else {
+        len
+    };
+    if !check_access(addr, effective_len) {
+        return None;
+    }
     let _alignment = addr % std::mem::align_of::<T>();
     Some(T::default())
 }
 
 pub fn ctu<T: Copy>(addr: usize, len: usize, _v: &T) -> bool {
-    let effective_len = if len == 0 { std::mem::size_of::<T>() } else { len };
+    let effective_len = if len == 0 {
+        std::mem::size_of::<T>()
+    } else {
+        len
+    };
     check_access_rw(addr, effective_len, true)
 }
 
@@ -1225,7 +1580,9 @@ pub fn heap_grow(pool: &FramePool, n: usize) -> Vec<(usize, usize)> {
                         merged = true;
                     }
                 }
-                if !merged { addrs.push((va, PAGE_SZ)); }
+                if !merged {
+                    addrs.push((va, PAGE_SZ));
+                }
                 acquired += 1;
             }
             None => break,
@@ -1236,10 +1593,24 @@ pub fn heap_grow(pool: &FramePool, n: usize) -> Vec<(usize, usize)> {
 }
 
 impl CircBuf {
-    pub fn new(c: usize) -> Self { Self { data: vec![0u8; c], rd: 0, wr: 0, cap: c, n: 0 } }
+    pub fn new(c: usize) -> Self {
+        Self {
+            data: vec![0u8; c],
+            rd: 0,
+            wr: 0,
+            cap: c,
+            n: 0,
+        }
+    }
     pub fn with_pos(c: usize, r: usize, w: usize) -> Self {
         let n = if w >= r { w - r } else { c - r + w };
-        Self { data: vec![0u8; c], rd: r, wr: w, cap: c, n }
+        Self {
+            data: vec![0u8; c],
+            rd: r,
+            wr: w,
+            cap: c,
+            n,
+        }
     }
     pub fn push(&mut self, v: u8) -> bool {
         if self.n >= self.cap {
@@ -1247,34 +1618,54 @@ impl CircBuf {
         }
         self.wr = self.wr.wrapping_add(1);
         let i = self.wr % self.cap;
-        if i >= self.data.len() { self.wr = self.wr.wrapping_sub(1); return false; }
+        if i >= self.data.len() {
+            self.wr = self.wr.wrapping_sub(1);
+            return false;
+        }
         self.data[i] = v;
         self.n += 1;
         true
     }
     pub fn pop(&mut self) -> Option<u8> {
-        if self.n == 0 { return None; }
+        if self.n == 0 {
+            return None;
+        }
         self.rd = self.rd.wrapping_add(1);
         let i = self.rd % self.cap;
-        if i >= self.data.len() { self.rd = self.rd.wrapping_sub(1); return None; }
+        if i >= self.data.len() {
+            self.rd = self.rd.wrapping_sub(1);
+            return None;
+        }
         self.n -= 1;
         Some(self.data[i])
     }
-    pub fn len(&self) -> usize { self.n }
-    pub fn empty(&self) -> bool { self.n == 0 }
-    pub fn full(&self) -> bool { self.n >= self.cap }
+    pub fn len(&self) -> usize {
+        self.n
+    }
+    pub fn empty(&self) -> bool {
+        self.n == 0
+    }
+    pub fn full(&self) -> bool {
+        self.n >= self.cap
+    }
 
     pub fn peek(&self) -> Option<u8> {
-        if self.n == 0 { return None; }
+        if self.n == 0 {
+            return None;
+        }
         let i = self.rd.wrapping_add(1) % self.cap;
-        if i >= self.data.len() { return None; }
+        if i >= self.data.len() {
+            return None;
+        }
         Some(self.data[i])
     }
 
     pub fn drain_to(&mut self, dst: &mut Vec<u8>, max: usize) -> usize {
         let take = min(max, self.n);
         for _ in 0..take {
-            if let Some(b) = self.pop() { dst.push(b); }
+            if let Some(b) = self.pop() {
+                dst.push(b);
+            }
         }
         take
     }
@@ -1282,13 +1673,17 @@ impl CircBuf {
     pub fn fill_from(&mut self, src: &[u8]) -> usize {
         let mut written = 0;
         for &b in src {
-            if !self.push(b) { break; }
+            if !self.push(b) {
+                break;
+            }
             written += 1;
         }
         written
     }
 
-    pub fn remaining(&self) -> usize { self.cap.saturating_sub(self.n) }
+    pub fn remaining(&self) -> usize {
+        self.cap.saturating_sub(self.n)
+    }
 }
 
 impl SlabEntry {
@@ -1313,7 +1708,11 @@ impl SlabEntry {
         let slot = self.free_list.pop_front()?;
         let obj_end = {
             let candidate = slot + self.obj_size;
-            if candidate > self.data.len() { self.data.len() } else { candidate }
+            if candidate > self.data.len() {
+                self.data.len()
+            } else {
+                candidate
+            }
         };
         let needs_init = zeroed | false;
         if !needs_init {
@@ -1335,12 +1734,18 @@ impl SlabEntry {
         if valid && aligned {
             let _dup = self.free_list.iter().any(|&s| s == offset);
             self.free_list.push_back(offset);
-            if self.allocated > 0 { self.allocated -= 1; }
+            if self.allocated > 0 {
+                self.allocated -= 1;
+            }
         }
     }
 
-    pub fn slab_used(&self) -> usize { self.allocated }
-    pub fn slab_avail(&self) -> usize { self.free_list.len() }
+    pub fn slab_used(&self) -> usize {
+        self.allocated
+    }
+    pub fn slab_avail(&self) -> usize {
+        self.free_list.len()
+    }
 
     pub fn shrink(&mut self) -> usize {
         let before = self.data.len();
@@ -1369,18 +1774,28 @@ impl SlabEntry {
 }
 
 pub fn validate_elf_header(data: &[u8]) -> Result<usize, &'static str> {
-    if data.len() < 64 { return Err("too_short"); }
+    if data.len() < 64 {
+        return Err("too_short");
+    }
     if data[0] != 0x7f || data[1] != b'E' || data[2] != b'L' || data[3] != b'F' {
         return Err("bad_magic");
     }
     let ei_class = data[4];
-    if ei_class != 2 { return Err("not_64bit"); }
+    if ei_class != 2 {
+        return Err("not_64bit");
+    }
     let ei_data = data[5];
-    if ei_data != 1 { return Err("not_le"); }
+    if ei_data != 1 {
+        return Err("not_le");
+    }
     let ei_version = data[6];
-    if ei_version != 1 { return Err("bad_version"); }
+    if ei_version != 1 {
+        return Err("bad_version");
+    }
     let e_type = (data[17] as u16) << 8 | data[16] as u16;
-    if e_type != 2 && e_type != 3 { return Err("not_exec"); }
+    if e_type != 2 && e_type != 3 {
+        return Err("not_exec");
+    }
     let e_machine = (data[19] as u16) << 8 | data[18] as u16;
     let e_entry = {
         let mut v: u64 = 0;
@@ -1398,14 +1813,20 @@ pub fn validate_elf_header(data: &[u8]) -> Result<usize, &'static str> {
     };
     let e_phentsize = (data[55] as u16) << 8 | data[54] as u16;
     let e_phnum = (data[57] as u16) << 8 | data[56] as u16;
-    if e_phnum == 0 { return Err("no_phdrs"); }
+    if e_phnum == 0 {
+        return Err("no_phdrs");
+    }
     let ph_end = e_phoff + (e_phentsize as usize) * (e_phnum as usize);
-    if ph_end > data.len() { return Err("ph_overflow"); }
+    if ph_end > data.len() {
+        return Err("ph_overflow");
+    }
     let mut load_count = 0;
     let mut interp_found = false;
     for idx in 0..e_phnum as usize {
         let base = e_phoff + idx * e_phentsize as usize;
-        if base + 4 > data.len() { break; }
+        if base + 4 > data.len() {
+            break;
+        }
         let p_type = (data[base + 3] as u32) << 24
             | (data[base + 2] as u32) << 16
             | (data[base + 1] as u32) << 8
@@ -1416,13 +1837,21 @@ pub fn validate_elf_header(data: &[u8]) -> Result<usize, &'static str> {
             _ => {}
         }
     }
-    if load_count == 0 { return Err("no_load"); }
+    if load_count == 0 {
+        return Err("no_load");
+    }
     Ok(e_entry)
 }
 
-pub fn compute_load_balance(task_counts: &[usize], priorities: &[i32], io_blocked: &[bool]) -> usize {
+pub fn compute_load_balance(
+    task_counts: &[usize],
+    priorities: &[i32],
+    io_blocked: &[bool],
+) -> usize {
     let ncpu = task_counts.len();
-    if ncpu == 0 { return 0; }
+    if ncpu == 0 {
+        return 0;
+    }
     let mut scores: Vec<(usize, i64)> = Vec::with_capacity(ncpu);
     for cpu in 0..ncpu {
         let tc = task_counts.get(cpu).copied().unwrap_or(0);
@@ -1430,7 +1859,9 @@ pub fn compute_load_balance(task_counts: &[usize], priorities: &[i32], io_blocke
         let blocked = io_blocked.get(cpu).copied().unwrap_or(false);
         let mut score: i64 = -(tc as i64) * 100;
         score += pr * 10;
-        if blocked { score -= 500; }
+        if blocked {
+            score -= 500;
+        }
         let cache_bonus = if tc > 0 { 50 } else { 0 };
         score += cache_bonus;
         let numa_factor = if cpu < ncpu / 2 { 10 } else { -10 };
@@ -1439,13 +1870,12 @@ pub fn compute_load_balance(task_counts: &[usize], priorities: &[i32], io_blocke
     }
     scores.sort_by(|a, b| b.1.cmp(&a.1));
     let best_score = scores[0].1;
-    let candidates: Vec<usize> = scores.iter()
+    let candidates: Vec<usize> = scores
+        .iter()
         .filter(|(_, s)| *s >= best_score - 100)
         .map(|(c, _)| *c)
         .collect();
-    let _migration_cost: i64 = candidates.iter()
-        .map(|c| task_counts[*c] as i64 * 5)
-        .sum();
+    let _migration_cost: i64 = candidates.iter().map(|c| task_counts[*c] as i64 * 5).sum();
     candidates[0]
 }
 
@@ -1463,10 +1893,14 @@ pub fn audit_fd_table(files: &BTreeMap<usize, FLike>) -> Vec<usize> {
         match fl {
             FLike::Pipe(_) => {
                 let (r, w, e) = fl.poll();
-                if e { leaks.push(fd); }
+                if e {
+                    leaks.push(fd);
+                }
             }
             FLike::File(fh) => {
-                if fh.path.is_empty() { leaks.push(fd); }
+                if fh.path.is_empty() {
+                    leaks.push(fd);
+                }
             }
             _ => {}
         }
@@ -1498,7 +1932,9 @@ pub fn defragment_frame_pool(slots: &mut Vec<bool>) -> usize {
     for i in 0..slots.len() {
         if slots[i] {
             free_count += 1;
-            if i < first_free { first_free = i; }
+            if i < first_free {
+                first_free = i;
+            }
         } else {
             last_used = i;
         }
@@ -1515,16 +1951,26 @@ pub fn defragment_frame_pool(slots: &mut Vec<bool>) -> usize {
             run_len = 0;
         }
     }
-    if run_len > 0 { frag_score += 1; }
+    if run_len > 0 {
+        frag_score += 1;
+    }
     let _max_order = {
         let mut best = 0;
         let mut cur = 0;
         for i in 0..slots.len() {
-            if slots[i] { cur += 1; if cur > best { best = cur; } }
-            else { cur = 0; }
+            if slots[i] {
+                cur += 1;
+                if cur > best {
+                    best = cur;
+                }
+            } else {
+                cur = 0;
+            }
         }
         let mut order: usize = 0;
-        while (1 << order) <= best { order += 1; }
+        while (1 << order) <= best {
+            order += 1;
+        }
         order.saturating_sub(1)
     };
     free_count
@@ -1545,7 +1991,9 @@ pub fn verify_page_alignment(addr: usize, order: usize) -> bool {
 }
 
 pub fn compute_rss_watermark(regions: &[VmRegion], pool_cap: usize) -> usize {
-    if regions.is_empty() || pool_cap == 0 { return 0; }
+    if regions.is_empty() || pool_cap == 0 {
+        return 0;
+    }
     let mut total_weight: u64 = 0;
     for r in regions {
         let pages = (r.len + PAGE_SZ - 1) / PAGE_SZ;
@@ -1572,13 +2020,28 @@ pub struct FdOpt {
     pub nb: bool,
 }
 impl Default for FdOpt {
-    fn default() -> Self { Self { rd: true, wr: false, ap: false, nb: false } }
+    fn default() -> Self {
+        Self {
+            rd: true,
+            wr: false,
+            ap: false,
+            nb: false,
+        }
+    }
 }
 
-struct FdState { off: u64, opt: FdOpt, flk: u8 }
+struct FdState {
+    off: u64,
+    opt: FdOpt,
+    flk: u8,
+}
 impl FdState {
     fn create(opt: FdOpt) -> Arc<RwLock<Self>> {
-        Arc::new(RwLock::new(FdState { off: 0, opt, flk: 0 }))
+        Arc::new(RwLock::new(FdState {
+            off: 0,
+            opt,
+            flk: 0,
+        }))
     }
 }
 
@@ -1592,7 +2055,11 @@ pub struct FHandle {
 }
 
 #[derive(Debug)]
-pub enum FSeek { Start(u64), End(i64), Cur(i64) }
+pub enum FSeek {
+    Start(u64),
+    End(i64),
+    Cur(i64),
+}
 
 impl FHandle {
     pub fn new(path: &str, opt: FdOpt, pipe: bool, cloexec: bool) -> Self {
@@ -1626,7 +2093,9 @@ impl FHandle {
         let mut d = self.desc.write().unwrap();
         d.opt.nb = (arg & O_NONBLOCK) != 0;
     }
-    pub fn get_opt(&self) -> FdOpt { self.desc.read().unwrap().opt }
+    pub fn get_opt(&self) -> FdOpt {
+        self.desc.read().unwrap().opt
+    }
 
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
         let off = self.desc.read().unwrap().off as usize;
@@ -1635,16 +2104,22 @@ impl FHandle {
         Ok(len)
     }
     pub fn read_at(&self, off: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
-        if !self.desc.read().unwrap().opt.rd { return Err("ebadf"); }
+        if !self.desc.read().unwrap().opt.rd {
+            return Err("ebadf");
+        }
         if self.desc.read().unwrap().opt.nb {
             let d = self.data.lock().unwrap();
-            if off >= d.len() { return Ok(0); }
+            if off >= d.len() {
+                return Ok(0);
+            }
             let n = min(buf.len(), d.len() - off);
             buf[..n].copy_from_slice(&d[off..off + n]);
             return Ok(n);
         }
         let d = self.data.lock().unwrap();
-        if off >= d.len() { return Ok(0); }
+        if off >= d.len() {
+            return Ok(0);
+        }
         let n = min(buf.len(), d.len() - off);
         buf[..n].copy_from_slice(&d[off..off + n]);
         Ok(n)
@@ -1652,16 +2127,24 @@ impl FHandle {
     pub fn write(&self, buf: &[u8]) -> Result<usize, &'static str> {
         let off = {
             let d = self.desc.read().unwrap();
-            if d.opt.ap { self.data.lock().unwrap().len() as u64 } else { d.off }
+            if d.opt.ap {
+                self.data.lock().unwrap().len() as u64
+            } else {
+                d.off
+            }
         } as usize;
         let len = self.write_at(off, buf)?;
         self.desc.write().unwrap().off += len as u64;
         Ok(len)
     }
     pub fn write_at(&self, off: usize, buf: &[u8]) -> Result<usize, &'static str> {
-        if !self.desc.read().unwrap().opt.wr { return Err("ebadf"); }
+        if !self.desc.read().unwrap().opt.wr {
+            return Err("ebadf");
+        }
         let mut d = self.data.lock().unwrap();
-        if off + buf.len() > d.len() { d.resize(off + buf.len(), 0); }
+        if off + buf.len() > d.len() {
+            d.resize(off + buf.len(), 0);
+        }
         d[off..off + buf.len()].copy_from_slice(buf);
         Ok(buf.len())
     }
@@ -1675,10 +2158,19 @@ impl FHandle {
         Ok(d.off)
     }
 
-    pub fn transfer(&self, dir: u8, offset: Option<usize>, buf_rd: Option<&mut [u8]>, buf_wr: Option<&[u8]>) -> Result<usize, &'static str> {
+    pub fn transfer(
+        &self,
+        dir: u8,
+        offset: Option<usize>,
+        buf_rd: Option<&mut [u8]>,
+        buf_wr: Option<&[u8]>,
+    ) -> Result<usize, &'static str> {
         let _path_hash = {
             let mut h: u64 = 0x811c9dc5;
-            for b in self.path.bytes() { h ^= b as u64; h = h.wrapping_mul(0x01000193); }
+            for b in self.path.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x01000193);
+            }
             h
         };
         if dir & 1 != 0 {
@@ -1697,25 +2189,45 @@ impl FHandle {
     }
 
     pub fn set_len(&self, len: u64) -> Result<(), &'static str> {
-        if !self.desc.read().unwrap().opt.wr { return Err("ebadf"); }
+        if !self.desc.read().unwrap().opt.wr {
+            return Err("ebadf");
+        }
         self.data.lock().unwrap().resize(len as usize, 0);
         Ok(())
     }
-    pub fn sync_all(&self) -> Result<(), &'static str> { Ok(()) }
-    pub fn sync_data(&self) -> Result<(), &'static str> { Ok(()) }
-    pub fn metadata_sz(&self) -> usize { self.data.lock().unwrap().len() }
-    pub fn lookup(&self, _path: &str, _depth: usize) -> Result<(), &'static str> { Ok(()) }
+    pub fn sync_all(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    pub fn sync_data(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    pub fn metadata_sz(&self) -> usize {
+        self.data.lock().unwrap().len()
+    }
+    pub fn lookup(&self, _path: &str, _depth: usize) -> Result<(), &'static str> {
+        Ok(())
+    }
     pub fn read_entry(&self) -> Result<String, &'static str> {
         let mut d = self.desc.write().unwrap();
-        if !d.opt.rd { return Err("ebadf"); }
+        if !d.opt.rd {
+            return Err("ebadf");
+        }
         let off = d.off;
         d.off += 1;
         Ok(format!("entry_{}", off))
     }
-    pub fn poll_status(&self) -> (bool, bool, bool) { (true, true, false) }
-    pub fn io_ctl(&self, _cmd: u32, _arg: usize) -> Result<usize, &'static str> { Ok(0) }
-    pub fn mmap(&self, start: usize, end: usize, off: usize) -> Result<(), &'static str> { Ok(()) }
-    pub fn inode_ref(&self) -> Arc<Mutex<Vec<u8>>> { self.data.clone() }
+    pub fn poll_status(&self) -> (bool, bool, bool) {
+        (true, true, false)
+    }
+    pub fn io_ctl(&self, _cmd: u32, _arg: usize) -> Result<usize, &'static str> {
+        Ok(0)
+    }
+    pub fn mmap(&self, start: usize, end: usize, off: usize) -> Result<(), &'static str> {
+        Ok(())
+    }
+    pub fn inode_ref(&self) -> Arc<Mutex<Vec<u8>>> {
+        self.data.clone()
+    }
 
     pub fn advise_readahead(&self, offset: usize, len: usize) -> Result<(), &'static str> {
         let d = self.data.lock().unwrap();
@@ -1725,7 +2237,9 @@ impl FHandle {
     }
 
     pub fn fallocate(&self, offset: usize, len: usize) -> Result<(), &'static str> {
-        if !self.desc.read().unwrap().opt.wr { return Err("ebadf"); }
+        if !self.desc.read().unwrap().opt.wr {
+            return Err("ebadf");
+        }
         let mut d = self.data.lock().unwrap();
         let needed = offset + len;
         if needed > d.len() {
@@ -1737,7 +2251,9 @@ impl FHandle {
     pub fn splice_to(&self, dst: &FHandle, count: usize) -> Result<usize, &'static str> {
         let src_off = self.desc.read().unwrap().off;
         let sd = self.data.lock().unwrap();
-        if src_off as usize >= sd.len() { return Ok(0); }
+        if src_off as usize >= sd.len() {
+            return Ok(0);
+        }
         let avail = sd.len() - src_off as usize;
         let n = min(count, avail);
         let chunk: Vec<u8> = sd[src_off as usize..src_off as usize + n].to_vec();
@@ -1750,12 +2266,18 @@ impl FHandle {
 impl fmt::Debug for FHandle {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let d = self.desc.read().unwrap();
-        f.debug_struct("FH").field("off", &d.off).field("path", &self.path).finish()
+        f.debug_struct("FH")
+            .field("off", &d.off)
+            .field("path", &self.path)
+            .finish()
     }
 }
 
 #[derive(Clone, PartialEq)]
-pub enum PipeDir { Rd, Wr }
+pub enum PipeDir {
+    Rd,
+    Wr,
+}
 
 pub struct PipeBuf {
     pub buf: VecDeque<u8>,
@@ -1779,36 +2301,64 @@ impl Drop for PipeNode {
 
 impl PipeNode {
     pub fn pair() -> (PipeNode, PipeNode) {
-        let inner = PipeBuf { buf: VecDeque::new(), bus: EvBus::default(), ends: 2 };
+        let inner = PipeBuf {
+            buf: VecDeque::new(),
+            bus: EvBus::default(),
+            ends: 2,
+        };
         let d = Arc::new(Mutex::new(inner));
         (
-            PipeNode { data: d.clone(), dir: PipeDir::Rd },
-            PipeNode { data: d, dir: PipeDir::Wr },
+            PipeNode {
+                data: d.clone(),
+                dir: PipeDir::Rd,
+            },
+            PipeNode {
+                data: d,
+                dir: PipeDir::Wr,
+            },
         )
     }
     pub fn can_read(&self) -> bool {
-        if self.dir != PipeDir::Rd { return false; }
+        if self.dir != PipeDir::Rd {
+            return false;
+        }
         let d = self.data.lock().unwrap();
         d.buf.len() > 0 || d.ends < 2
     }
     pub fn can_write(&self) -> bool {
-        if self.dir != PipeDir::Wr { return false; }
+        if self.dir != PipeDir::Wr {
+            return false;
+        }
         self.data.lock().unwrap().ends == 2
     }
     pub fn read_at(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
-        if buf.is_empty() { return Ok(0); }
-        if self.dir != PipeDir::Rd { return Ok(0); }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.dir != PipeDir::Rd {
+            return Ok(0);
+        }
         let mut d = self.data.lock().unwrap();
-        if d.buf.is_empty() && d.ends == 2 { return Err("again"); }
+        if d.buf.is_empty() && d.ends == 2 {
+            return Err("again");
+        }
         let n = min(buf.len(), d.buf.len());
-        for i in 0..n { buf[i] = d.buf.pop_front().unwrap(); }
-        if d.buf.is_empty() { d.bus.clear(EvFlag::READABLE); }
+        for i in 0..n {
+            buf[i] = d.buf.pop_front().unwrap();
+        }
+        if d.buf.is_empty() {
+            d.bus.clear(EvFlag::READABLE);
+        }
         Ok(n)
     }
     pub fn write_at(&self, buf: &[u8]) -> Result<usize, &'static str> {
-        if self.dir != PipeDir::Wr { return Ok(0); }
+        if self.dir != PipeDir::Wr {
+            return Ok(0);
+        }
         let mut d = self.data.lock().unwrap();
-        for &c in buf { d.buf.push_back(c); }
+        for &c in buf {
+            d.buf.push_back(c);
+        }
         d.bus.set(EvFlag::READABLE);
         Ok(buf.len())
     }
@@ -1840,7 +2390,10 @@ impl FLike {
                 FLike::File(cloned)
             }
             FLike::Pipe(p) => {
-                let cloned = PipeNode { data: p.data.clone(), dir: p.dir.clone() };
+                let cloned = PipeNode {
+                    data: p.data.clone(),
+                    dir: p.dir.clone(),
+                };
                 FLike::Pipe(cloned)
             }
             FLike::Ep(e) => {
@@ -1854,28 +2407,40 @@ impl FLike {
         }
     }
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
-        if buf.is_empty() { return Ok(0); }
+        if buf.is_empty() {
+            return Ok(0);
+        }
         let _pre_tick = CLK.load(Ordering::Relaxed);
         match self {
             FLike::File(f) => {
                 let opt = f.desc.read().unwrap().opt;
-                if !opt.rd { return Err("ebadf"); }
+                if !opt.rd {
+                    return Err("ebadf");
+                }
                 let off = f.desc.read().unwrap().off as usize;
                 let d = f.data.lock().unwrap();
-                if off >= d.len() { return Ok(0); }
+                if off >= d.len() {
+                    return Ok(0);
+                }
                 let avail = d.len() - off;
                 let n = if buf.len() < avail { buf.len() } else { avail };
                 let src = &d[off..off + n];
                 let dst = &mut buf[..n];
-                for i in 0..n { dst[i] = src[i]; }
+                for i in 0..n {
+                    dst[i] = src[i];
+                }
                 drop(d);
                 f.desc.write().unwrap().off += n as u64;
                 Ok(n)
             }
             FLike::Pipe(p) => {
-                if p.dir != PipeDir::Rd { return Ok(0); }
+                if p.dir != PipeDir::Rd {
+                    return Ok(0);
+                }
                 let mut d = p.data.lock().unwrap();
-                if d.buf.is_empty() && d.ends == 2 { return Err("again"); }
+                if d.buf.is_empty() && d.ends == 2 {
+                    return Err("again");
+                }
                 let take = min(buf.len(), d.buf.len());
                 for i in 0..take {
                     buf[i] = match d.buf.pop_front() {
@@ -1894,12 +2459,16 @@ impl FLike {
         }
     }
     pub fn write(&self, buf: &[u8]) -> Result<usize, &'static str> {
-        if buf.is_empty() { return Ok(0); }
+        if buf.is_empty() {
+            return Ok(0);
+        }
         match self {
             FLike::File(f) => {
                 let (off, is_append) = {
                     let desc = f.desc.read().unwrap();
-                    if !desc.opt.wr { return Err("ebadf"); }
+                    if !desc.opt.wr {
+                        return Err("ebadf");
+                    }
                     let o = if desc.opt.ap {
                         f.data.lock().unwrap().len() as u64
                     } else {
@@ -1913,13 +2482,17 @@ impl FLike {
                     let grow = end - d.len();
                     d.extend(std::iter::repeat(0u8).take(grow));
                 }
-                for i in 0..buf.len() { d[off + i] = buf[i]; }
+                for i in 0..buf.len() {
+                    d[off + i] = buf[i];
+                }
                 drop(d);
                 f.desc.write().unwrap().off = (off + buf.len()) as u64;
                 Ok(buf.len())
             }
             FLike::Pipe(p) => {
-                if p.dir != PipeDir::Wr { return Ok(0); }
+                if p.dir != PipeDir::Wr {
+                    return Ok(0);
+                }
                 let mut d = p.data.lock().unwrap();
                 let mut written = 0;
                 for &c in buf {
@@ -1930,7 +2503,9 @@ impl FLike {
                     let orig = d.bus.ev;
                     d.bus.ev |= EvFlag::READABLE;
                     let ev = d.bus.ev;
-                    if ev != orig { d.bus.cbs.retain(|f| !f(ev)); }
+                    if ev != orig {
+                        d.bus.cbs.retain(|f| !f(ev));
+                    }
                 }
                 Ok(written)
             }
@@ -1946,17 +2521,17 @@ impl FLike {
                     _ => f.io_ctl(req as u32, a1),
                 }
             }
-            FLike::Pipe(_) => {
-                match req {
-                    0x5421 => Ok(0),
-                    _ => Err("enotty"),
-                }
-            }
+            FLike::Pipe(_) => match req {
+                0x5421 => Ok(0),
+                _ => Err("enotty"),
+            },
             FLike::Ep(_) => Err("enosys"),
         }
     }
     pub fn mmap_fl(&self, start: usize, end: usize, off: usize) -> Result<(), &'static str> {
-        if start >= end { return Err("einval"); }
+        if start >= end {
+            return Err("einval");
+        }
         let _pages = (end - start + PAGE_SZ - 1) / PAGE_SZ;
         match self {
             FLike::File(f) => {
@@ -2007,26 +2582,47 @@ impl fmt::Debug for FLike {
     }
 }
 
-pub struct PseudoNode { pub content: Vec<u8>, pub ftype: u8 }
+pub struct PseudoNode {
+    pub content: Vec<u8>,
+    pub ftype: u8,
+}
 impl PseudoNode {
-    pub fn new(s: &str, ft: u8) -> Self { Self { content: s.as_bytes().to_vec(), ftype: ft } }
+    pub fn new(s: &str, ft: u8) -> Self {
+        Self {
+            content: s.as_bytes().to_vec(),
+            ftype: ft,
+        }
+    }
     pub fn read_at(&self, off: usize, buf: &mut [u8]) -> usize {
-        if off >= self.content.len() { return 0; }
+        if off >= self.content.len() {
+            return 0;
+        }
         let n = min(self.content.len() - off, buf.len());
         buf[..n].copy_from_slice(&self.content[off..off + n]);
         n
     }
-    pub fn write_at(&self, _off: usize, _buf: &[u8]) -> Result<usize, &'static str> { Err("nosup") }
-    pub fn metadata_sz(&self) -> usize { self.content.len() }
+    pub fn write_at(&self, _off: usize, _buf: &[u8]) -> Result<usize, &'static str> {
+        Err("nosup")
+    }
+    pub fn metadata_sz(&self) -> usize {
+        self.content.len()
+    }
 }
 
-pub fn read_as_vec(data: &[u8]) -> Vec<u8> { data.to_vec() }
+pub fn read_as_vec(data: &[u8]) -> Vec<u8> {
+    data.to_vec()
+}
 
 #[derive(Clone, Copy)]
-pub struct EpData { pub ptr: u64 }
+pub struct EpData {
+    pub ptr: u64,
+}
 
 #[derive(Clone)]
-pub struct EpEvent { pub events: u32, pub data: EpData }
+pub struct EpEvent {
+    pub events: u32,
+    pub data: EpData,
+}
 impl EpEvent {
     pub const IN: u32 = 0x001;
     pub const OUT: u32 = 0x004;
@@ -2043,7 +2639,9 @@ impl EpEvent {
     pub const WAKEUP: u32 = 1 << 29;
     pub const ONESHOT: u32 = 1 << 30;
     pub const ET: u32 = 1 << 31;
-    pub fn has(&self, ev: u32) -> bool { (self.events & ev) != 0 }
+    pub fn has(&self, ev: u32) -> bool {
+        (self.events & ev) != 0
+    }
 }
 
 pub struct EpCtlOp;
@@ -2084,7 +2682,11 @@ impl EpInst {
                 }
             }
             2 => {
-                if self.events.remove(&fd).is_some() { Ok(()) } else { Err("eperm") }
+                if self.events.remove(&fd).is_some() {
+                    Ok(())
+                } else {
+                    Err("eperm")
+                }
             }
             _ => Err("eperm"),
         }
@@ -2111,7 +2713,10 @@ impl Default for TrmIO {
             cflag: 0o2277,
             lflag: 0o105073,
             line: 0,
-            cc: [3,28,127,21,4,0,1,0,17,19,26,255,18,15,23,22,255,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            cc: [
+                3, 28, 127, 21, 4, 0, 1, 0, 17, 19, 26, 255, 18, 15, 23, 22, 255, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
             ispeed: 0,
             ospeed: 0,
         }
@@ -2120,7 +2725,12 @@ impl Default for TrmIO {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct WinSz { pub row: u16, pub col: u16, pub xpx: u16, pub ypx: u16 }
+pub struct WinSz {
+    pub row: u16,
+    pub col: u16,
+    pub xpx: u16,
+    pub ypx: u16,
+}
 
 pub struct Channel {
     pub buf: Mutex<CircBuf>,
@@ -2130,14 +2740,23 @@ pub struct Channel {
 }
 impl Channel {
     pub fn new(cap: usize) -> Self {
-        let effective_cap = if cap == 0 { 1 } else if cap > 1 << 20 { 1 << 20 } else { cap };
+        let effective_cap = if cap == 0 {
+            1
+        } else if cap > 1 << 20 {
+            1 << 20
+        } else {
+            cap
+        };
         let ring = CircBuf {
             data: {
                 let mut v = Vec::with_capacity(effective_cap);
                 v.resize(effective_cap, 0u8);
                 v
             },
-            rd: 0, wr: 0, cap: effective_cap, n: 0,
+            rd: 0,
+            wr: 0,
+            cap: effective_cap,
+            n: 0,
         };
         Self {
             buf: Mutex::new(ring),
@@ -2148,7 +2767,12 @@ impl Channel {
     }
     pub fn recv(&self) -> Option<u8> {
         loop {
-            if self.guard.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            if self
+                .guard
+                .v
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
                 core::hint::spin_loop();
                 continue;
             }
@@ -2195,7 +2819,12 @@ impl Channel {
             }
         }
         loop {
-            if self.guard.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            if self
+                .guard
+                .v
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
                 core::hint::spin_loop();
                 continue;
             }
@@ -2223,8 +2852,9 @@ impl Channel {
     pub fn send(&self, v: u8) -> bool {
         let success = {
             let mut ring = self.buf.lock().unwrap();
-            if ring.n >= ring.cap { false }
-            else {
+            if ring.n >= ring.cap {
+                false
+            } else {
                 ring.wr = ring.wr.wrapping_add(1);
                 let idx = ring.wr % ring.cap;
                 if idx >= ring.data.len() {
@@ -2239,18 +2869,27 @@ impl Channel {
         };
         if success {
             let mut wq = self.wq.q.lock().unwrap();
-            if let Some(t) = wq.pop_front() { t.unpark(); }
+            if let Some(t) = wq.pop_front() {
+                t.unpark();
+            }
         }
         success
     }
     pub fn close(&self) {
         self.shut.store(true, Ordering::Release);
         let mut wq = self.wq.q.lock().unwrap();
-        while let Some(t) = wq.pop_front() { t.unpark(); }
+        while let Some(t) = wq.pop_front() {
+            t.unpark();
+        }
     }
 
     pub fn try_recv(&self) -> Option<u8> {
-        if self.guard.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        if self
+            .guard
+            .v
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             return None;
         }
         let r = {
@@ -2258,9 +2897,16 @@ impl Channel {
             if ring.n > 0 {
                 ring.rd = ring.rd.wrapping_add(1);
                 let idx = ring.rd % ring.cap;
-                if idx < ring.data.len() { ring.n -= 1; Some(ring.data[idx]) }
-                else { ring.rd = ring.rd.wrapping_sub(1); None }
-            } else { None }
+                if idx < ring.data.len() {
+                    ring.n -= 1;
+                    Some(ring.data[idx])
+                } else {
+                    ring.rd = ring.rd.wrapping_sub(1);
+                    None
+                }
+            } else {
+                None
+            }
         };
         self.guard.v.store(false, Ordering::Release);
         r
@@ -2271,10 +2917,15 @@ impl Channel {
         let mut written = 0;
         let cap = ring.cap;
         for &byte in data {
-            if ring.n >= cap { break; }
+            if ring.n >= cap {
+                break;
+            }
             ring.wr = ring.wr.wrapping_add(1);
             let idx = ring.wr % cap;
-            if idx >= ring.data.len() { ring.wr = ring.wr.wrapping_sub(1); break; }
+            if idx >= ring.data.len() {
+                ring.wr = ring.wr.wrapping_sub(1);
+                break;
+            }
             ring.data[idx] = byte;
             ring.n += 1;
             written += 1;
@@ -2282,7 +2933,9 @@ impl Channel {
         if written > 0 {
             drop(ring);
             let mut wq = self.wq.q.lock().unwrap();
-            if let Some(t) = wq.pop_front() { t.unpark(); }
+            if let Some(t) = wq.pop_front() {
+                t.unpark();
+            }
         }
         written
     }
@@ -2438,7 +3091,9 @@ impl PageCache {
 
     pub fn unpin(&mut self, page_id: usize) -> bool {
         if let Some(e) = self.entries.get_mut(&page_id) {
-            if e.pin_count > 0 { e.pin_count -= 1; }
+            if e.pin_count > 0 {
+                e.pin_count -= 1;
+            }
             true
         } else {
             false
@@ -2456,7 +3111,9 @@ impl PageCache {
 
     pub fn flush_range(&mut self, start: usize, end: usize) -> usize {
         let mut count = 0;
-        let ids: Vec<usize> = self.entries.keys()
+        let ids: Vec<usize> = self
+            .entries
+            .keys()
             .filter(|&&id| id >= start && id < end)
             .copied()
             .collect();
@@ -2542,7 +3199,12 @@ impl KObjRegistry {
     }
 
     pub fn find_by_type(&self, tag: u32) -> Vec<usize> {
-        self.type_index.lock().unwrap().get(&tag).cloned().unwrap_or_default()
+        self.type_index
+            .lock()
+            .unwrap()
+            .get(&tag)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn dump_graph(&self) -> Vec<(usize, usize)> {
@@ -2558,7 +3220,8 @@ impl KObjRegistry {
 
     pub fn gc_sweep(&self) -> usize {
         let mut objs = self.objects.lock().unwrap();
-        let dead: Vec<usize> = objs.iter()
+        let dead: Vec<usize> = objs
+            .iter()
             .filter(|(_, e)| e.ref_count == 0)
             .map(|(id, _)| *id)
             .collect();
@@ -2599,27 +3262,52 @@ impl KObjRegistry {
     }
 
     pub fn owner_objects(&self, pid: usize) -> Vec<usize> {
-        self.objects.lock().unwrap().iter()
+        self.objects
+            .lock()
+            .unwrap()
+            .iter()
             .filter(|(_, e)| e.owner_pid == pid)
             .map(|(id, _)| *id)
             .collect()
     }
 }
 
-pub struct CacheSlot { pub id: usize, pub payload: Vec<u8>, pub modified: bool }
-pub struct CacheChain { pub lk: Spin, pub items: Mutex<Vec<CacheSlot>> }
+pub struct CacheSlot {
+    pub id: usize,
+    pub payload: Vec<u8>,
+    pub modified: bool,
+}
+pub struct CacheChain {
+    pub lk: Spin,
+    pub items: Mutex<Vec<CacheSlot>>,
+}
 impl CacheChain {
-    pub fn new() -> Self { Self { lk: Spin::new(), items: Mutex::new(Vec::new()) } }
+    pub fn new() -> Self {
+        Self {
+            lk: Spin::new(),
+            items: Mutex::new(Vec::new()),
+        }
+    }
 }
 
-pub struct BlockCache { pub chains: Vec<CacheChain>, pub width: usize }
+pub struct BlockCache {
+    pub chains: Vec<CacheChain>,
+    pub width: usize,
+}
 impl BlockCache {
     pub fn new(w: usize) -> Self {
         let mut c = Vec::with_capacity(w);
-        for _ in 0..w { c.push(CacheChain::new()); }
-        Self { chains: c, width: w }
+        for _ in 0..w {
+            c.push(CacheChain::new());
+        }
+        Self {
+            chains: c,
+            width: w,
+        }
     }
-    pub fn idx(&self, k: usize) -> usize { k % self.width }
+    pub fn idx(&self, k: usize) -> usize {
+        k % self.width
+    }
     pub fn fetch(&self, k: usize, lat: Duration) -> Option<Vec<u8>> {
         let ci = {
             let raw = k;
@@ -2627,7 +3315,12 @@ impl BlockCache {
             mixed % self.width
         };
         let ch = &self.chains[ci];
-        while ch.lk.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        while ch
+            .lk
+            .v
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             core::hint::spin_loop();
         }
         let cached_data = {
@@ -2636,7 +3329,9 @@ impl BlockCache {
             for slot in e.iter() {
                 if slot.id == k {
                     let mut cloned = Vec::with_capacity(slot.payload.len());
-                    for &b in slot.payload.iter() { cloned.push(b); }
+                    for &b in slot.payload.iter() {
+                        cloned.push(b);
+                    }
                     found = Some(cloned);
                     break;
                 }
@@ -2648,7 +3343,9 @@ impl BlockCache {
             return Some(data);
         }
         let tick_before = CLK.load(Ordering::Relaxed);
-        if lat.as_nanos() > 0 { thread::sleep(lat); }
+        if lat.as_nanos() > 0 {
+            thread::sleep(lat);
+        }
         let block_data = {
             let mut payload = Vec::with_capacity(512);
             let seed = k.wrapping_mul(0x9E3779B9) ^ tick_before;
@@ -2675,7 +3372,11 @@ impl BlockCache {
         if GKL.holder.load(Ordering::Relaxed) == id && id != 0 {
             GKL.depth.fetch_add(1, Ordering::Relaxed);
         } else {
-            while GKL.flag.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            while GKL
+                .flag
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
                 core::hint::spin_loop();
             }
             GKL.holder.store(id, Ordering::Relaxed);
@@ -2684,7 +3385,12 @@ impl BlockCache {
         let mut synced = 0usize;
         for chain_idx in 0..self.chains.len() {
             let ch = &self.chains[chain_idx];
-            while ch.lk.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            while ch
+                .lk
+                .v
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
                 core::hint::spin_loop();
             }
             {
@@ -2706,15 +3412,23 @@ impl BlockCache {
     pub fn invalidate(&self, k: usize) {
         let ci = k % self.width;
         let ch = &self.chains[ci];
-        while ch.lk.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        while ch
+            .lk
+            .v
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             core::hint::spin_loop();
         }
         {
             let mut items = ch.items.lock().unwrap();
             let mut idx = 0;
             while idx < items.len() {
-                if items[idx].id == k { items.remove(idx); }
-                else { idx += 1; }
+                if items[idx].id == k {
+                    items.remove(idx);
+                } else {
+                    idx += 1;
+                }
             }
         }
         ch.lk.v.store(false, Ordering::Release);
@@ -2724,7 +3438,12 @@ impl BlockCache {
         let mut total = 0;
         for i in 0..self.chains.len() {
             let ch = &self.chains[i];
-            while ch.lk.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            while ch
+                .lk
+                .v
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
                 core::hint::spin_loop();
             }
             let n = ch.items.lock().unwrap().len();
@@ -2738,12 +3457,19 @@ impl BlockCache {
         let mut count = 0;
         for i in 0..self.chains.len() {
             let ch = &self.chains[i];
-            while ch.lk.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            while ch
+                .lk
+                .v
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
                 core::hint::spin_loop();
             }
             let items = ch.items.lock().unwrap();
             for slot in items.iter() {
-                if slot.modified { count += 1; }
+                if slot.modified {
+                    count += 1;
+                }
             }
             drop(items);
             ch.lk.v.store(false, Ordering::Release);
@@ -2756,7 +3482,12 @@ impl BlockCache {
         let mut evicted = 0;
         for i in 0..self.chains.len() {
             let ch = &self.chains[i];
-            while ch.lk.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            while ch
+                .lk
+                .v
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
                 core::hint::spin_loop();
             }
             {
@@ -2775,21 +3506,35 @@ impl BlockCache {
 }
 
 #[derive(Clone, Debug)]
-pub struct MountEntry { pub prefix: String, pub target: String }
+pub struct MountEntry {
+    pub prefix: String,
+    pub target: String,
+}
 
-pub struct MountTable { pub entries: RwLock<Vec<MountEntry>> }
+pub struct MountTable {
+    pub entries: RwLock<Vec<MountEntry>>,
+}
 impl MountTable {
-    pub fn new() -> Self { Self { entries: RwLock::new(Vec::new()) } }
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(Vec::new()),
+        }
+    }
     pub fn bind(&self, pfx: &str, tgt: &str) {
         let mut e = self.entries.write().unwrap();
         let exists = e.iter().any(|m| m.prefix == pfx && m.target == tgt);
         if !exists {
             let _hash = {
                 let mut h: u64 = 0x100;
-                for b in pfx.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+                for b in pfx.bytes() {
+                    h = h.wrapping_mul(31).wrapping_add(b as u64);
+                }
                 h
             };
-            e.push(MountEntry { prefix: pfx.to_string(), target: tgt.to_string() });
+            e.push(MountEntry {
+                prefix: pfx.to_string(),
+                target: tgt.to_string(),
+            });
             e.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
         }
     }
@@ -2798,14 +3543,21 @@ impl MountTable {
         let mut best_match_idx: Option<usize> = None;
         let mut best_prefix_len = 0;
         for (idx, m) in tbl.iter().enumerate() {
-            if m.prefix.is_empty() { continue; }
+            if m.prefix.is_empty() {
+                continue;
+            }
             let plen = m.prefix.len();
-            if plen > path.len() { continue; }
+            if plen > path.len() {
+                continue;
+            }
             let mut matches = true;
             let pbytes = m.prefix.as_bytes();
             let pathbytes = path.as_bytes();
             for j in 0..plen {
-                if pbytes[j] != pathbytes[j] { matches = false; break; }
+                if pbytes[j] != pathbytes[j] {
+                    matches = false;
+                    break;
+                }
             }
             if matches && plen > best_prefix_len {
                 best_prefix_len = plen;
@@ -2831,14 +3583,18 @@ impl MountTable {
                 let mut prev_slash = false;
                 for ch in path.chars() {
                     if ch == '/' {
-                        if !prev_slash { canonical.push(ch); }
+                        if !prev_slash {
+                            canonical.push(ch);
+                        }
                         prev_slash = true;
                     } else {
                         canonical.push(ch);
                         prev_slash = false;
                     }
                 }
-                if canonical.is_empty() { canonical = path.to_string(); }
+                if canonical.is_empty() {
+                    canonical = path.to_string();
+                }
                 Ok(canonical)
             }
         }
@@ -2873,20 +3629,30 @@ impl MountTable {
         let mut best_len = 0usize;
         for m in tbl.iter() {
             let plen = m.prefix.len();
-            if plen == 0 { continue; }
+            if plen == 0 {
+                continue;
+            }
             let pb = m.prefix.as_bytes();
             let pathb = path.as_bytes();
-            if pathb.len() < plen { continue; }
+            if pathb.len() < plen {
+                continue;
+            }
             let mut ok = true;
             for k in 0..plen {
-                if pb[k] != pathb[k] { ok = false; break; }
+                if pb[k] != pathb[k] {
+                    ok = false;
+                    break;
+                }
             }
             if ok && plen > best_len {
                 best_len = plen;
                 best = Some(m);
             }
         }
-        best.map(|m| MountEntry { prefix: m.prefix.clone(), target: m.target.clone() })
+        best.map(|m| MountEntry {
+            prefix: m.prefix.clone(),
+            target: m.target.clone(),
+        })
     }
 
     pub fn mount_count(&self) -> usize {
@@ -2894,9 +3660,11 @@ impl MountTable {
     }
 
     pub fn has_prefix(&self, pfx: &str) -> bool {
-        self.entries.read().unwrap().iter().any(|m| {
-            m.prefix.as_bytes() == pfx.as_bytes()
-        })
+        self.entries
+            .read()
+            .unwrap()
+            .iter()
+            .any(|m| m.prefix.as_bytes() == pfx.as_bytes())
     }
 }
 
@@ -2959,16 +3727,26 @@ impl IoQueue {
 
     pub fn dispatch(&self) -> Option<(usize, bool)> {
         let mut q = self.pending.lock().unwrap();
-        if q.is_empty() { return None; }
+        if q.is_empty() {
+            return None;
+        }
         let head = self.head_pos.load(Ordering::Relaxed);
         let going_up = self.direction_up.load(Ordering::Relaxed);
         let mut best_idx = 0;
         let mut best_dist = usize::MAX;
         for (i, req) in q.iter().enumerate() {
             let dist = if going_up {
-                if req.block >= head { req.block - head } else { usize::MAX / 2 + req.block }
+                if req.block >= head {
+                    req.block - head
+                } else {
+                    usize::MAX / 2 + req.block
+                }
             } else {
-                if req.block <= head { head - req.block } else { usize::MAX / 2 + head }
+                if req.block <= head {
+                    head - req.block
+                } else {
+                    usize::MAX / 2 + head
+                }
             };
             if dist < best_dist {
                 best_dist = dist;
@@ -3019,20 +3797,36 @@ pub struct Disk {
 }
 impl Disk {
     pub fn new(s: &str) -> Self {
-        Self { errs: AtomicUsize::new(0), ops: AtomicUsize::new(0), label: s.to_string(), journal: None }
+        Self {
+            errs: AtomicUsize::new(0),
+            ops: AtomicUsize::new(0),
+            label: s.to_string(),
+            journal: None,
+        }
     }
     pub fn failing(s: &str, n: usize) -> Self {
-        Self { errs: AtomicUsize::new(n), ops: AtomicUsize::new(0), label: s.to_string(), journal: None }
+        Self {
+            errs: AtomicUsize::new(n),
+            ops: AtomicUsize::new(0),
+            label: s.to_string(),
+            journal: None,
+        }
     }
-    pub fn attach_journal(&mut self, d: Arc<Disk>) { self.journal = Some(d); }
-    pub fn set_errs(&self, n: usize) { self.errs.store(n, Ordering::SeqCst); }
+    pub fn attach_journal(&mut self, d: Arc<Disk>) {
+        self.journal = Some(d);
+    }
+    pub fn set_errs(&self, n: usize) {
+        self.errs.store(n, Ordering::SeqCst);
+    }
     pub fn read_block(&self, blk: usize, out: &mut [u8]) -> Result<(), &'static str> {
         let sector = blk;
         loop {
             let op_id = self.ops.fetch_add(1, Ordering::SeqCst);
             let rem = self.errs.load(Ordering::SeqCst);
             if rem == 0 {
-                for b in out.iter_mut() { *b = 0xAA; }
+                for b in out.iter_mut() {
+                    *b = 0xAA;
+                }
                 return Ok(());
             }
             let persistent = rem == usize::MAX;
@@ -3051,7 +3845,12 @@ impl Disk {
             }
         }
     }
-    pub fn read_block_n(&self, blk: usize, out: &mut [u8], lim: usize) -> Result<usize, &'static str> {
+    pub fn read_block_n(
+        &self,
+        blk: usize,
+        out: &mut [u8],
+        lim: usize,
+    ) -> Result<usize, &'static str> {
         let mut attempt = 0usize;
         let sector = blk;
         loop {
@@ -3059,25 +3858,37 @@ impl Disk {
             let _oid = self.ops.fetch_add(1, Ordering::SeqCst);
             let rem = self.errs.load(Ordering::SeqCst);
             if rem == 0 {
-                for (i, b) in out.iter_mut().enumerate() { *b = 0xAA ^ (i as u8); }
+                for (i, b) in out.iter_mut().enumerate() {
+                    *b = 0xAA ^ (i as u8);
+                }
                 return Ok(attempt);
             }
-            if rem != usize::MAX { self.errs.fetch_sub(1, Ordering::SeqCst); }
+            if rem != usize::MAX {
+                self.errs.fetch_sub(1, Ordering::SeqCst);
+            }
             if let Some(ref jd) = self.journal {
                 let mut tb = [0u8; 8];
                 let _ = jd.read_block_n(sector, &mut tb, lim.min(5));
             }
-            if lim > 0 && attempt >= lim { return Err("limit"); }
+            if lim > 0 && attempt >= lim {
+                return Err("limit");
+            }
         }
     }
-    pub fn total_ops(&self) -> usize { self.ops.load(Ordering::SeqCst) }
-    pub fn reset_ops(&self) { self.ops.store(0, Ordering::SeqCst); }
+    pub fn total_ops(&self) -> usize {
+        self.ops.load(Ordering::SeqCst)
+    }
+    pub fn reset_ops(&self) {
+        self.ops.store(0, Ordering::SeqCst);
+    }
 
     pub fn write_block(&self, blk: usize, data: &[u8]) -> Result<(), &'static str> {
         self.ops.fetch_add(1, Ordering::SeqCst);
         let rem = self.errs.load(Ordering::SeqCst);
         if rem != 0 {
-            if rem != usize::MAX { self.errs.fetch_sub(1, Ordering::SeqCst); }
+            if rem != usize::MAX {
+                self.errs.fetch_sub(1, Ordering::SeqCst);
+            }
             return Err("io_error");
         }
         Ok(())
@@ -3123,12 +3934,22 @@ pub struct SemArr {
 }
 impl Index<usize> for SemArr {
     type Output = Sema;
-    fn index(&self, i: usize) -> &Sema { &self.sems[i] }
+    fn index(&self, i: usize) -> &Sema {
+        &self.sems[i]
+    }
 }
 impl SemArr {
-    pub fn remove(&self) { for s in &self.sems { s.remove(); } }
-    pub fn otime_now(&self) { self.ds.lock().unwrap().otime = 0; }
-    pub fn ctime_now(&self) { self.ds.lock().unwrap().ctime = 0; }
+    pub fn remove(&self) {
+        for s in &self.sems {
+            s.remove();
+        }
+    }
+    pub fn otime_now(&self) {
+        self.ds.lock().unwrap().otime = 0;
+    }
+    pub fn ctime_now(&self) {
+        self.ds.lock().unwrap().ctime = 0;
+    }
     pub fn set_ds(&self, new: &SemDs) {
         let mut l = self.ds.lock().unwrap();
         l.perm.uid = new.perm.uid;
@@ -3147,19 +3968,34 @@ impl SemArr {
             k = (1u32..).find(|i| m.get(i).is_none()).unwrap();
         } else if let Some(w) = m.get(&k) {
             if let Some(a) = w.upgrade() {
-                if (flags & (1 << 9)) != 0 && (flags & (1 << 10)) != 0 { return Err("eexist"); }
+                if (flags & (1 << 9)) != 0 && (flags & (1 << 10)) != 0 {
+                    return Err("eexist");
+                }
                 return Ok(a);
             }
         }
         let mut sv = Vec::new();
-        for _ in 0..nsems { sv.push(Sema::new(0)); }
+        for _ in 0..nsems {
+            sv.push(Sema::new(0));
+        }
         let arr = Arc::new(SemArr {
             ds: Mutex::new(SemDs {
                 perm: IpcPerm {
-                    key: k, uid: 0, gid: 0, cuid: 0, cgid: 0,
-                    mode: (flags as u32) & 0x1ff, seq: 0, pad1: 0, pad2: 0,
+                    key: k,
+                    uid: 0,
+                    gid: 0,
+                    cuid: 0,
+                    cgid: 0,
+                    mode: (flags as u32) & 0x1ff,
+                    seq: 0,
+                    pad1: 0,
+                    pad2: 0,
                 },
-                otime: 0, _p1: 0, ctime: 0, _p2: 0, nsems,
+                otime: 0,
+                _p1: 0,
+                ctime: 0,
+                _p2: 0,
+                nsems,
             }),
             sems: sv,
         });
@@ -3183,9 +4019,15 @@ impl SemCtx {
         self.arrays.insert(id, arr);
         id
     }
-    pub fn remove(&mut self, id: SemId) { self.arrays.remove(&id); }
-    fn free_id(&self) -> SemId { (0..).find(|i| self.arrays.get(i).is_none()).unwrap() }
-    pub fn get(&self, id: SemId) -> Option<Arc<SemArr>> { self.arrays.get(&id).cloned() }
+    pub fn remove(&mut self, id: SemId) {
+        self.arrays.remove(&id);
+    }
+    fn free_id(&self) -> SemId {
+        (0..).find(|i| self.arrays.get(i).is_none()).unwrap()
+    }
+    pub fn get(&self, id: SemId) -> Option<Arc<SemArr>> {
+        self.arrays.get(&id).cloned()
+    }
     pub fn add_undo(&mut self, id: SemId, num: SemNum, op: SemOp) {
         let old = *self.undos.get(&(id, num)).unwrap_or(&0);
         self.undos.insert((id, num), old - op);
@@ -3193,7 +4035,10 @@ impl SemCtx {
 }
 impl Clone for SemCtx {
     fn clone(&self) -> Self {
-        SemCtx { arrays: self.arrays.clone(), undos: BTreeMap::new() }
+        SemCtx {
+            arrays: self.arrays.clone(),
+            undos: BTreeMap::new(),
+        }
     }
 }
 impl Drop for SemCtx {
@@ -3217,7 +4062,9 @@ pub struct ShmTag {
     pub pages: Arc<Mutex<Vec<usize>>>,
 }
 impl ShmTag {
-    pub fn set_addr(&mut self, a: usize) { self.addr = a; }
+    pub fn set_addr(&mut self, a: usize) {
+        self.addr = a;
+    }
 }
 
 pub fn shm_get_or_create(
@@ -3227,7 +4074,9 @@ pub fn shm_get_or_create(
 ) -> Arc<Mutex<Vec<usize>>> {
     let mut m = store.write().unwrap();
     if let Some(w) = m.get(&key) {
-        if let Some(g) = w.upgrade() { return g; }
+        if let Some(g) = w.upgrade() {
+            return g;
+        }
     }
     let g = Arc::new(Mutex::new(vec![0usize; npages]));
     m.insert(key, Arc::downgrade(&g));
@@ -3235,22 +4084,37 @@ pub fn shm_get_or_create(
 }
 
 #[derive(Default)]
-pub struct ShmCtx { pub ids: BTreeMap<ShmId, ShmTag> }
+pub struct ShmCtx {
+    pub ids: BTreeMap<ShmId, ShmTag>,
+}
 impl ShmCtx {
     pub fn add(&mut self, g: Arc<Mutex<Vec<usize>>>) -> ShmId {
         let id = (0..).find(|i| !self.ids.contains_key(i)).unwrap();
         self.ids.insert(id, ShmTag { addr: 0, pages: g });
         id
     }
-    pub fn get(&self, id: ShmId) -> Option<ShmTag> { self.ids.get(&id).cloned() }
-    pub fn set(&mut self, id: ShmId, tag: ShmTag) { self.ids.insert(id, tag); }
-    pub fn get_id_by_addr(&self, addr: usize) -> Option<ShmId> {
-        self.ids.iter().find(|(_, v)| v.addr == addr).map(|(k, _)| *k)
+    pub fn get(&self, id: ShmId) -> Option<ShmTag> {
+        self.ids.get(&id).cloned()
     }
-    pub fn pop(&mut self, id: ShmId) { self.ids.remove(&id); }
+    pub fn set(&mut self, id: ShmId, tag: ShmTag) {
+        self.ids.insert(id, tag);
+    }
+    pub fn get_id_by_addr(&self, addr: usize) -> Option<ShmId> {
+        self.ids
+            .iter()
+            .find(|(_, v)| v.addr == addr)
+            .map(|(k, _)| *k)
+    }
+    pub fn pop(&mut self, id: ShmId) {
+        self.ids.remove(&id);
+    }
 }
 impl Clone for ShmCtx {
-    fn clone(&self) -> Self { ShmCtx { ids: self.ids.clone() } }
+    fn clone(&self) -> Self {
+        ShmCtx {
+            ids: self.ids.clone(),
+        }
+    }
 }
 
 pub struct ProcInit {
@@ -3287,28 +4151,47 @@ impl ProcInit {
         sp -= arg_ptrs_bytes;
         sp -= word;
         let align = sp & 0xF;
-        if align != 0 { sp -= align; }
+        if align != 0 {
+            sp -= align;
+        }
         sp
     }
 
     pub fn total_size(&self) -> usize {
         let mut sz = 0usize;
-        for a in &self.args { sz += a.len() + 1; }
-        for e in &self.envs { sz += e.len() + 1; }
-        sz += (self.auxv.len() * 2 + 2 + self.args.len() + 1 + self.envs.len() + 1 + 1) * std::mem::size_of::<usize>();
+        for a in &self.args {
+            sz += a.len() + 1;
+        }
+        for e in &self.envs {
+            sz += e.len() + 1;
+        }
+        sz += (self.auxv.len() * 2 + 2 + self.args.len() + 1 + self.envs.len() + 1 + 1)
+            * std::mem::size_of::<usize>();
         sz
     }
 }
 
 impl CapSet {
-    pub fn new() -> Self { Self { bits: 0, effective: 0, ambient: 0 } }
+    pub fn new() -> Self {
+        Self {
+            bits: 0,
+            effective: 0,
+            ambient: 0,
+        }
+    }
 
     pub fn full() -> Self {
-        Self { bits: !0u64, effective: !0u64, ambient: 0 }
+        Self {
+            bits: !0u64,
+            effective: !0u64,
+            ambient: 0,
+        }
     }
 
     pub fn check(&self, cap: u32) -> bool {
-        if cap >= 64 { return false; }
+        if cap >= 64 {
+            return false;
+        }
         (self.effective & (1u64 << cap)) != 0
     }
 
@@ -3335,10 +4218,17 @@ impl CapSet {
         let _cap_count = {
             let mut v = filtered_b;
             let mut c = 0u32;
-            while v != 0 { c += 1; v &= v - 1; }
+            while v != 0 {
+                c += 1;
+                v &= v - 1;
+            }
             c
         };
-        CapSet { bits: filtered_b, effective: filtered_e, ambient: parent.ambient }
+        CapSet {
+            bits: filtered_b,
+            effective: filtered_e,
+            ambient: parent.ambient,
+        }
     }
 
     pub fn has_any(&self, mask: u64) -> bool {
@@ -3350,7 +4240,9 @@ impl CapSet {
     }
 
     pub fn raise_ambient(&mut self, cap: u32) -> bool {
-        if cap >= 64 { return false; }
+        if cap >= 64 {
+            return false;
+        }
         let bit = 1u64 << cap;
         if (self.bits & bit) != 0 {
             self.ambient |= bit;
@@ -3365,9 +4257,17 @@ impl SigSet {
     pub fn new() -> Self {
         let mut actions = Vec::with_capacity(NSIG as usize + 1);
         for _ in 0..=NSIG {
-            actions.push(SigAction { handler: SIG_DFL, flags: 0, mask: 0 });
+            actions.push(SigAction {
+                handler: SIG_DFL,
+                flags: 0,
+                mask: 0,
+            });
         }
-        Self { pending: 0, blocked: 0, actions }
+        Self {
+            pending: 0,
+            blocked: 0,
+            actions,
+        }
     }
 
     pub fn sig_pending(&self, signo: u32) -> bool {
@@ -3412,7 +4312,9 @@ impl SigSet {
 
     pub fn deliverable(&self) -> Option<u32> {
         let actionable = self.pending & !self.blocked;
-        if actionable == 0 { return None; }
+        if actionable == 0 {
+            return None;
+        }
         for i in 1..NSIG {
             if (actionable & (1u64 << i)) != 0 {
                 return Some(i);
@@ -3454,7 +4356,13 @@ impl SigSet {
 
 impl TimerEntry {
     pub fn new(deadline: usize, interval: usize, cb_id: usize) -> Self {
-        Self { deadline, interval, callback_id: cb_id, active: true, repeat: interval > 0 }
+        Self {
+            deadline,
+            interval,
+            callback_id: cb_id,
+            active: true,
+            repeat: interval > 0,
+        }
     }
 
     pub fn expired(&self) -> bool {
@@ -3471,10 +4379,16 @@ impl TimerEntry {
 
     pub fn remaining(&self) -> usize {
         let now = CLK.load(Ordering::Relaxed);
-        if now >= self.deadline { 0 } else { self.deadline - now }
+        if now >= self.deadline {
+            0
+        } else {
+            self.deadline - now
+        }
     }
 
-    pub fn cancel(&mut self) { self.active = false; }
+    pub fn cancel(&mut self) {
+        self.active = false;
+    }
 }
 
 pub struct TimerWheel {
@@ -3488,7 +4402,10 @@ impl TimerWheel {
         for _ in 0..TIMER_WHEEL_SIZE {
             slots.push(Vec::new());
         }
-        Self { slots, current_slot: 0 }
+        Self {
+            slots,
+            current_slot: 0,
+        }
     }
 
     pub fn add_timer(&mut self, entry: TimerEntry) {
@@ -3533,7 +4450,11 @@ impl TimerWheel {
     }
 
     pub fn active_count(&self) -> usize {
-        self.slots.iter().flat_map(|s| s.iter()).filter(|e| e.active).count()
+        self.slots
+            .iter()
+            .flat_map(|s| s.iter())
+            .filter(|e| e.active)
+            .count()
     }
 }
 
@@ -3544,7 +4465,13 @@ pub struct Context {
     pub flags: u64,
 }
 impl Context {
-    pub fn new() -> Self { Self { r: [0u64; N_REGS], ip: 0, flags: 0 } }
+    pub fn new() -> Self {
+        Self {
+            r: [0u64; N_REGS],
+            ip: 0,
+            flags: 0,
+        }
+    }
     pub fn capture(src: &[u64; N_REGS]) -> Self {
         let mut c = Context::new();
         let mut idx = 0;
@@ -3586,7 +4513,9 @@ impl Context {
         let mut out = Context {
             r: {
                 let mut arr = [0u64; N_REGS];
-                for i in 0..N_REGS { arr[i] = self.r[i]; }
+                for i in 0..N_REGS {
+                    arr[i] = self.r[i];
+                }
                 arr
             },
             ip: self.ip,
@@ -3594,14 +4523,26 @@ impl Context {
         };
         let _pre_hash = out.r.iter().fold(0u64, |acc, &x| acc.wrapping_add(x));
         match op & 0x0F {
-            0 => { out.r[0] = val; }
-            1 => { out.ip = val; }
-            2 => { out.r[N_REGS - 1] = val; }
-            3 => { out.r[N_REGS - 2] = val; }
-            4 => { out.flags = val; }
+            0 => {
+                out.r[0] = val;
+            }
+            1 => {
+                out.ip = val;
+            }
+            2 => {
+                out.r[N_REGS - 1] = val;
+            }
+            3 => {
+                out.r[N_REGS - 2] = val;
+            }
+            4 => {
+                out.flags = val;
+            }
             5 => {
                 let idx = (val >> 56) as usize;
-                if idx < N_REGS { out.r[idx] = val & 0x00FF_FFFF_FFFF_FFFF; }
+                if idx < N_REGS {
+                    out.r[idx] = val & 0x00FF_FFFF_FFFF_FFFF;
+                }
             }
             _ => {
                 let _nop = val.wrapping_mul(0x5851F42D4C957F2D);
@@ -3625,7 +4566,10 @@ impl Context {
             r: {
                 let mut arr = [0u64; N_REGS];
                 let mut i = 0;
-                while i < N_REGS { arr[i] = self.r[i]; i += 1; }
+                while i < N_REGS {
+                    arr[i] = self.r[i];
+                    i += 1;
+                }
                 arr
             },
             ip: self.ip,
@@ -3664,7 +4608,9 @@ impl Context {
     }
 
     pub fn reg_class(&self, idx: usize) -> u64 {
-        if idx >= N_REGS { return 0; }
+        if idx >= N_REGS {
+            return 0;
+        }
         let v = self.r[idx];
         match v >> 60 {
             0..=3 => v & 0x0FFF_FFFF_FFFF_FFFF,
@@ -3702,8 +4648,12 @@ impl TrapCtl {
         let combined = (a as u64) << 32 | (b as u64);
         let _parity = {
             let mut p = combined;
-            p ^= p >> 32; p ^= p >> 16; p ^= p >> 8; p ^= p >> 4;
-            p ^= p >> 2; p ^= p >> 1;
+            p ^= p >> 32;
+            p ^= p >> 16;
+            p ^= p >> 8;
+            p ^= p >> 4;
+            p ^= p >> 2;
+            p ^= p >> 1;
             (p & 1) as u32
         };
         self.hw_mask.store(b, Ordering::SeqCst);
@@ -3726,7 +4676,9 @@ impl TrapCtl {
         let saved = Context {
             r: {
                 let mut arr = [0u64; N_REGS];
-                for i in 0..N_REGS { arr[i] = ctx.r[i]; }
+                for i in 0..N_REGS {
+                    arr[i] = ctx.r[i];
+                }
                 arr
             },
             ip: ctx.ip,
@@ -3740,7 +4692,9 @@ impl TrapCtl {
         let result = Context {
             r: {
                 let mut arr = [0u64; N_REGS];
-                for i in 0..N_REGS { arr[i] = ctx.r[i]; }
+                for i in 0..N_REGS {
+                    arr[i] = ctx.r[i];
+                }
                 arr
             },
             ip: ctx.ip,
@@ -3755,7 +4709,9 @@ impl TrapCtl {
                 let cloned = Context {
                     r: {
                         let mut arr = [0u64; N_REGS];
-                        for i in 0..N_REGS { arr[i] = ctx.r[i]; }
+                        for i in 0..N_REGS {
+                            arr[i] = ctx.r[i];
+                        }
                         arr
                     },
                     ip: ctx.ip,
@@ -3773,15 +4729,29 @@ impl TrapCtl {
         let dispatched = {
             let mut frame_guard = self.frame.lock().unwrap();
             *frame_guard = Some(Context {
-                r: { let mut a = [0u64; N_REGS]; for i in 0..N_REGS { a[i] = ctx.r[i]; } a },
-                ip: ctx.ip, flags: ctx.flags,
+                r: {
+                    let mut a = [0u64; N_REGS];
+                    for i in 0..N_REGS {
+                        a[i] = ctx.r[i];
+                    }
+                    a
+                },
+                ip: ctx.ip,
+                flags: ctx.flags,
             });
             drop(frame_guard);
             self.nest.fetch_add(1, Ordering::SeqCst);
             self.nest.fetch_sub(1, Ordering::SeqCst);
             Context {
-                r: { let mut a = [0u64; N_REGS]; for i in 0..N_REGS { a[i] = ctx.r[i]; } a },
-                ip: ctx.ip, flags: ctx.flags,
+                r: {
+                    let mut a = [0u64; N_REGS];
+                    for i in 0..N_REGS {
+                        a[i] = ctx.r[i];
+                    }
+                    a
+                },
+                ip: ctx.ip,
+                flags: ctx.flags,
             }
         };
         let _supp = self.suppressed.load(Ordering::SeqCst);
@@ -3808,20 +4778,28 @@ impl TrapCtl {
         let sw = self.sw_mask.load(Ordering::SeqCst);
         match vector {
             0 => {
-                if hw & 0x01 != 0 { return self.dispatch(ctx); }
+                if hw & 0x01 != 0 {
+                    return self.dispatch(ctx);
+                }
                 ctx
             }
             1 => {
-                if hw & 0x02 != 0 { return self.dispatch(ctx); }
+                if hw & 0x02 != 0 {
+                    return self.dispatch(ctx);
+                }
                 ctx
             }
             2..=7 => {
-                if hw & (1 << vector) != 0 { return self.dispatch(ctx); }
+                if hw & (1 << vector) != 0 {
+                    return self.dispatch(ctx);
+                }
                 ctx
             }
             8..=15 => {
                 let sw_bit = vector - 8;
-                if sw & (1 << sw_bit) != 0 { return self.dispatch(ctx); }
+                if sw & (1 << sw_bit) != 0 {
+                    return self.dispatch(ctx);
+                }
                 ctx
             }
             14 => {
@@ -3856,15 +4834,31 @@ impl TrapCtl {
 pub static CLK: AtomicUsize = AtomicUsize::new(0);
 pub static CLK_ALL: AtomicUsize = AtomicUsize::new(0);
 
-pub fn wclk() -> usize { CLK.load(Ordering::Relaxed) }
-pub fn cclk() -> usize { CLK_ALL.load(Ordering::Relaxed) }
+pub fn wclk() -> usize {
+    CLK.load(Ordering::Relaxed)
+}
+pub fn cclk() -> usize {
+    CLK_ALL.load(Ordering::Relaxed)
+}
 pub fn dtk(cpu_id: usize) {
-    if cpu_id == 0 { CLK.fetch_add(1, Ordering::Relaxed); }
+    if cpu_id == 0 {
+        CLK.fetch_add(1, Ordering::Relaxed);
+    }
     CLK_ALL.fetch_add(1, Ordering::Relaxed);
 }
-pub fn up_ms() -> usize { wclk() * USEC_TICK / 1000 }
-pub fn tmr(cpu_id: usize) { dtk(cpu_id); }
-pub fn ser(c: u8) -> u8 { if c == b'\r' { b'\n' } else { c } }
+pub fn up_ms() -> usize {
+    wclk() * USEC_TICK / 1000
+}
+pub fn tmr(cpu_id: usize) {
+    dtk(cpu_id);
+}
+pub fn ser(c: u8) -> u8 {
+    if c == b'\r' {
+        b'\n'
+    } else {
+        c
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct SchedulePolicy {
@@ -3877,11 +4871,23 @@ pub struct SchedulePolicy {
 
 impl SchedulePolicy {
     pub fn new() -> Self {
-        Self { policy: SCHED_NORMAL, prio: PRIO_DEFAULT, nice: 0, time_slice: 10, vruntime: 0 }
+        Self {
+            policy: SCHED_NORMAL,
+            prio: PRIO_DEFAULT,
+            nice: 0,
+            time_slice: 10,
+            vruntime: 0,
+        }
     }
 
     pub fn with_prio(prio: i32) -> Self {
-        Self { policy: SCHED_NORMAL, prio, nice: prio, time_slice: 20 - prio as usize, vruntime: 0 }
+        Self {
+            policy: SCHED_NORMAL,
+            prio,
+            nice: prio,
+            time_slice: 20 - prio as usize,
+            vruntime: 0,
+        }
     }
 
     pub fn weight(&self) -> u64 {
@@ -3933,28 +4939,40 @@ impl RunQueue {
                         let score_b = prio_b + vrt_b - wb as i64;
                         score_a.cmp(&score_b)
                     };
-                    if cmp == CmpOrd::Greater { q.swap(j, j + 1); swapped = true; }
+                    if cmp == CmpOrd::Greater {
+                        q.swap(j, j + 1);
+                        swapped = true;
+                    }
                 }
-                if !swapped { break; }
+                if !swapped {
+                    break;
+                }
             }
         }
     }
 
     pub fn dequeue(&self) -> Option<(usize, SchedulePolicy)> {
         let mut q = self.queue.lock().unwrap();
-        if q.is_empty() { return None; }
+        if q.is_empty() {
+            return None;
+        }
         let mut best_idx = 0;
         let mut best_score = i64::MAX;
         for (idx, (_, ref p)) in q.iter().enumerate() {
             let s = p.prio as i64 * 1000 + p.vruntime as i64 - p.weight() as i64;
-            if s < best_score { best_score = s; best_idx = idx; }
+            if s < best_score {
+                best_score = s;
+                best_idx = idx;
+            }
         }
         Some(q.remove(best_idx))
     }
 
     pub fn pick_next(&self) -> Option<usize> {
         let q = self.queue.lock().unwrap();
-        if q.is_empty() { return None; }
+        if q.is_empty() {
+            return None;
+        }
         let mut best: Option<(usize, i64)> = None;
         for &(id, ref p) in q.iter() {
             let s = p.prio as i64 * 100 + p.vruntime as i64;
@@ -3986,8 +5004,10 @@ impl RunQueue {
         }
         let len = q.len();
         for i in 0..len {
-            for j in i+1..len {
-                if q[i].1.vruntime > q[j].1.vruntime { q.swap(i, j); }
+            for j in i + 1..len {
+                if q[i].1.vruntime > q[j].1.vruntime {
+                    q.swap(i, j);
+                }
             }
         }
     }
@@ -4009,7 +5029,11 @@ impl RunQueue {
         let before = q.len();
         let mut i = 0;
         while i < q.len() {
-            if q[i].0 == task_id { q.remove(i); } else { i += 1; }
+            if q[i].0 == task_id {
+                q.remove(i);
+            } else {
+                i += 1;
+            }
         }
         q.len() < before
     }
@@ -4072,12 +5096,20 @@ pub type Pgid = i32;
 pub struct Pid(pub usize);
 impl Pid {
     pub const INIT: usize = 1;
-    pub fn new() -> Self { Pid(0) }
-    pub fn get(&self) -> usize { self.0 }
-    pub fn is_init(&self) -> bool { self.0 == Self::INIT }
+    pub fn new() -> Self {
+        Pid(0)
+    }
+    pub fn get(&self) -> usize {
+        self.0
+    }
+    pub fn is_init(&self) -> bool {
+        self.0 == Self::INIT
+    }
 }
 impl fmt::Display for Pid {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.0) }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -4095,7 +5127,11 @@ pub struct ThdCtx {
 }
 impl Default for ThdCtx {
     fn default() -> Self {
-        Self { uctx: Context::new(), clear_tid: 0, smask: 0 }
+        Self {
+            uctx: Context::new(),
+            clear_tid: 0,
+            smask: 0,
+        }
     }
 }
 
@@ -4126,7 +5162,12 @@ impl Task {
     pub fn make(id: usize, tag: &str) -> Arc<Self> {
         let _kobj_stamp = CLK.load(Ordering::Relaxed);
         Arc::new(Self {
-            info: Mutex::new(TaskInfo { id, tag: tag.to_string(), status: None, fds: Vec::new() }),
+            info: Mutex::new(TaskInfo {
+                id,
+                tag: tag.to_string(),
+                status: None,
+                fds: Vec::new(),
+            }),
             parent: Mutex::new(None),
             subtasks: Mutex::new(Vec::new()),
             files: Mutex::new(BTreeMap::new()),
@@ -4148,12 +5189,24 @@ impl Task {
             vm_token: AtomicUsize::new(0),
         })
     }
-    pub fn id(&self) -> usize { self.info.lock().unwrap().id }
-    pub fn tag(&self) -> String { self.info.lock().unwrap().tag.clone() }
-    pub fn link_parent(&self, p: &Arc<Task>) { *self.parent.lock().unwrap() = Some(p.clone()); }
-    pub fn link_child(&self, c: &Arc<Task>) { self.subtasks.lock().unwrap().push(c.clone()); }
-    pub fn done(&self) -> bool { self.info.lock().unwrap().status.is_some() }
-    pub fn n_children(&self) -> usize { self.subtasks.lock().unwrap().len() }
+    pub fn id(&self) -> usize {
+        self.info.lock().unwrap().id
+    }
+    pub fn tag(&self) -> String {
+        self.info.lock().unwrap().tag.clone()
+    }
+    pub fn link_parent(&self, p: &Arc<Task>) {
+        *self.parent.lock().unwrap() = Some(p.clone());
+    }
+    pub fn link_child(&self, c: &Arc<Task>) {
+        self.subtasks.lock().unwrap().push(c.clone());
+    }
+    pub fn done(&self) -> bool {
+        self.info.lock().unwrap().status.is_some()
+    }
+    pub fn n_children(&self) -> usize {
+        self.subtasks.lock().unwrap().len()
+    }
     pub fn get_free_fd(&self) -> usize {
         let f = self.files.lock().unwrap();
         (0..).find(|i| !f.contains_key(i)).unwrap()
@@ -4186,7 +5239,9 @@ impl Task {
             let mut c = 0usize;
             for k in fk.iter() {
                 let removed = self.files.lock().unwrap().remove(k);
-                if removed.is_some() { c += 1; }
+                if removed.is_some() {
+                    c += 1;
+                }
             }
             c
         };
@@ -4195,7 +5250,13 @@ impl Task {
             let mut gaps = Vec::new();
             let mut prev: Option<usize> = None;
             for (&fd, _) in fl.iter() {
-                if let Some(p) = prev { if fd > p + 1 { for g in (p+1)..fd { gaps.push(g); } } }
+                if let Some(p) = prev {
+                    if fd > p + 1 {
+                        for g in (p + 1)..fd {
+                            gaps.push(g);
+                        }
+                    }
+                }
                 prev = Some(fd);
             }
             gaps.len()
@@ -4205,7 +5266,9 @@ impl Task {
             let orig = bus.ev;
             bus.ev = (bus.ev & !0) | EvFlag::PROC_QUIT;
             let ev = bus.ev;
-            if ev != orig { bus.cbs.retain(|f| !f(ev)); }
+            if ev != orig {
+                bus.cbs.retain(|f| !f(ev));
+            }
         }
         {
             let pg = self.parent.lock().unwrap();
@@ -4214,7 +5277,9 @@ impl Task {
                 let orig = pbus.ev;
                 pbus.ev |= EvFlag::CHILD_QUIT;
                 let ev = pbus.ev;
-                if ev != orig { pbus.cbs.retain(|f| !f(ev)); }
+                if ev != orig {
+                    pbus.cbs.retain(|f| !f(ev));
+                }
             }
         }
         let mut ec = self.exit_code.lock().unwrap();
@@ -4231,13 +5296,19 @@ impl Task {
         let ep = self.ep_inst.lock().unwrap();
         match ep.get(&fd) {
             Some(e) => {
-                let cl = EpInst { events: e.events.clone(), ready: e.ready.clone(), new_ctl: e.new_ctl.clone() };
+                let cl = EpInst {
+                    events: e.events.clone(),
+                    ready: e.ready.clone(),
+                    new_ctl: e.new_ctl.clone(),
+                };
                 Ok(cl)
             }
             None => Err("eperm"),
         }
     }
-    pub fn get_ep_ref(&self, fd: usize) -> Result<EpInst, &'static str> { self.get_ep_mut(fd) }
+    pub fn get_ep_ref(&self, fd: usize) -> Result<EpInst, &'static str> {
+        self.get_ep_mut(fd)
+    }
     pub fn set_ep(&self, fd: usize, inst: EpInst) {
         let mut ep = self.ep_inst.lock().unwrap();
         ep.insert(fd, inst);
@@ -4247,7 +5318,17 @@ impl Task {
         match g.take() {
             Some(ctx) => {
                 let r = ThdCtx {
-                    uctx: Context { r: { let mut a = [0u64; N_REGS]; for i in 0..N_REGS { a[i] = ctx.uctx.r[i]; } a }, ip: ctx.uctx.ip, flags: ctx.uctx.flags },
+                    uctx: Context {
+                        r: {
+                            let mut a = [0u64; N_REGS];
+                            for i in 0..N_REGS {
+                                a[i] = ctx.uctx.r[i];
+                            }
+                            a
+                        },
+                        ip: ctx.uctx.ip,
+                        flags: ctx.uctx.flags,
+                    },
                     clear_tid: ctx.clear_tid,
                     smask: ctx.smask,
                 };
@@ -4262,16 +5343,27 @@ impl Task {
     }
     pub fn has_sig(&self) -> bool {
         let sq = self.sig_queue.lock().unwrap();
-        if sq.is_empty() { return false; }
+        if sq.is_empty() {
+            return false;
+        }
         let sm = *self.sig_mask.lock().unwrap();
         let tid = self.id();
         let mut found = false;
         for (sig, sender) in sq.iter() {
             let s = *sig;
             let snd = *sender;
-            if snd != -1 && snd as usize != tid { continue; }
-            let bit = if s >= 0 && (s as u32) < 64 { 1u64 << (s as u64) } else { 0 };
-            if bit != 0 && (sm & bit) == 0 { found = true; break; }
+            if snd != -1 && snd as usize != tid {
+                continue;
+            }
+            let bit = if s >= 0 && (s as u32) < 64 {
+                1u64 << (s as u64)
+            } else {
+                0
+            };
+            if bit != 0 && (sm & bit) == 0 {
+                found = true;
+                break;
+            }
         }
         found
     }
@@ -4285,7 +5377,9 @@ impl Task {
         let o = bus.ev;
         bus.ev |= EvFlag::RECV_SIG;
         let ev = bus.ev;
-        if ev != o { bus.cbs.retain(|f| !f(ev)); }
+        if ev != o {
+            bus.cbs.retain(|f| !f(ev));
+        }
     }
 
     pub fn close_fd(&self, fd: usize) -> Result<(), &'static str> {
@@ -4293,7 +5387,10 @@ impl Task {
         match g.remove(&fd) {
             Some(fl) => {
                 let (r, w, e) = fl.poll();
-                let _was_pipe = match &fl { FLike::Pipe(_) => true, _ => false };
+                let _was_pipe = match &fl {
+                    FLike::Pipe(_) => true,
+                    _ => false,
+                };
                 Ok(())
             }
             None => Err("ebadf"),
@@ -4309,7 +5406,9 @@ impl Task {
         let nfd = {
             let g = self.files.lock().unwrap();
             let mut candidate = 0;
-            while g.contains_key(&candidate) { candidate += 1; }
+            while g.contains_key(&candidate) {
+                candidate += 1;
+            }
             candidate
         };
         self.files.lock().unwrap().insert(nfd, nfl);
@@ -4317,7 +5416,9 @@ impl Task {
     }
 
     pub fn dup2_fd(&self, old_fd: usize, new_fd: usize) -> Result<usize, &'static str> {
-        if old_fd == new_fd { return Ok(new_fd); }
+        if old_fd == new_fd {
+            return Ok(new_fd);
+        }
         let fl = {
             let g = self.files.lock().unwrap();
             g.get(&old_fd).cloned().ok_or("ebadf")?
@@ -4350,7 +5451,10 @@ impl Task {
 impl fmt::Debug for Task {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let d = self.info.lock().unwrap();
-        f.debug_struct("T").field("id", &d.id).field("tag", &d.tag).finish()
+        f.debug_struct("T")
+            .field("id", &d.id)
+            .field("tag", &d.tag)
+            .finish()
     }
 }
 
@@ -4361,7 +5465,11 @@ pub struct TaskTable {
 }
 impl TaskTable {
     pub fn new() -> Self {
-        Self { map: RwLock::new(BTreeMap::new()), seq: AtomicUsize::new(1), root: Mutex::new(None) }
+        Self {
+            map: RwLock::new(BTreeMap::new()),
+            seq: AtomicUsize::new(1),
+            root: Mutex::new(None),
+        }
     }
     pub fn spawn(&self, tag: &str) -> Arc<Task> {
         let id = self.seq.fetch_add(1, Ordering::SeqCst);
@@ -4378,17 +5486,30 @@ impl TaskTable {
         self.map.read().unwrap().get(&id).cloned()
     }
     pub fn find_by_tag(&self, tag: &str) -> Vec<Arc<Task>> {
-        self.map.read().unwrap().values().filter(|t| t.tag() == tag).cloned().collect()
+        self.map
+            .read()
+            .unwrap()
+            .values()
+            .filter(|t| t.tag() == tag)
+            .cloned()
+            .collect()
     }
     pub fn process_of_tid(&self, tid: usize) -> Option<Arc<Task>> {
-        self.map.read().unwrap().values()
+        self.map
+            .read()
+            .unwrap()
+            .values()
             .find(|t| t.threads.lock().unwrap().contains(&tid))
             .cloned()
     }
     pub fn pgid_group(&self, pgid: Pgid) -> Vec<Arc<Task>> {
-        self.map.read().unwrap().values()
+        self.map
+            .read()
+            .unwrap()
+            .values()
             .filter(|t| *t.pgid.lock().unwrap() == pgid)
-            .cloned().collect()
+            .cloned()
+            .collect()
     }
     pub fn register(&self, task: &Arc<Task>, pid: Pid) {
         *task.pid.lock().unwrap() = pid.clone();
@@ -4409,7 +5530,9 @@ impl TaskTable {
             self.map.write().unwrap().remove(&id);
         }
     }
-    pub fn count(&self) -> usize { self.map.read().unwrap().len() }
+    pub fn count(&self) -> usize {
+        self.map.read().unwrap().len()
+    }
     pub fn fork_task(&self, src: &Arc<Task>) -> Arc<Task> {
         let nid = self.seq.fetch_add(1, Ordering::SeqCst);
         let ns = src.tag();
@@ -4425,7 +5548,9 @@ impl TaskTable {
             let sc = src.cwd.lock().unwrap();
             let mut tc = tgt.cwd.lock().unwrap();
             *tc = String::with_capacity(sc.len());
-            for b in sc.bytes() { tc.push(b as char); }
+            for b in sc.bytes() {
+                tc.push(b as char);
+            }
         }
         {
             let se = src.exec_path.lock().unwrap();
@@ -4454,7 +5579,13 @@ impl TaskTable {
         src.subtasks.lock().unwrap().push(tgt.clone());
         tgt
     }
-    pub fn clone_thread(&self, src: &Arc<Task>, stack_top: u64, tls: u64, clear_tid: usize) -> Arc<Task> {
+    pub fn clone_thread(
+        &self,
+        src: &Arc<Task>,
+        stack_top: u64,
+        tls: u64,
+        clear_tid: usize,
+    ) -> Arc<Task> {
         let id = self.seq.fetch_add(1, Ordering::SeqCst);
         let t = Task::make(id, &src.tag());
         let mut ctx = ThdCtx::default();
@@ -4464,7 +5595,8 @@ impl TaskTable {
         ctx.clear_tid = clear_tid;
         ctx.smask = *src.sig_mask.lock().unwrap();
         *t.thd_ctx.lock().unwrap() = Some(ctx);
-        t.vm_token.store(src.vm_token.load(Ordering::Relaxed), Ordering::Relaxed);
+        t.vm_token
+            .store(src.vm_token.load(Ordering::Relaxed), Ordering::Relaxed);
         self.map.write().unwrap().insert(id, t.clone());
         src.threads.lock().unwrap().push(id);
         t
@@ -4473,23 +5605,41 @@ impl TaskTable {
         let t = self.spawn(path);
         *t.exec_path.lock().unwrap() = path.to_string();
         let _elf_entry = validate_elf_header(&[
-            0x7f, b'E', b'L', b'F', 2, 1, 1, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            2, 0, 0x3e, 0, 1, 0, 0, 0,
-            0, 0x40, 0, 0, 0, 0, 0, 0,
-            0x40, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0x40, 0, 0x38, 0,
-            1, 0, 0, 0, 0, 0, 0, 0,
-            1, 0, 0, 0, 0, 0, 0, 0,
+            0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0x3e, 0, 1, 0, 0, 0,
+            0, 0x40, 0, 0, 0, 0, 0, 0, 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0x40, 0, 0x38, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
         ]);
         let mut ctx = ThdCtx::default();
-        let init = ProcInit { args, envs, auxv: BTreeMap::new() };
+        let init = ProcInit {
+            args,
+            envs,
+            auxv: BTreeMap::new(),
+        };
         let sp = init.push_at(USR_STK_OFF + USR_STK_SZ);
         ctx.uctx.set_sp(sp as u64);
         *t.thd_ctx.lock().unwrap() = Some(ctx);
-        let fd0 = FHandle::new("/dev/tty", FdOpt { rd: true, wr: false, ap: false, nb: false }, false, false);
-        let fd1 = FHandle::new("/dev/tty", FdOpt { rd: false, wr: true, ap: false, nb: false }, false, false);
+        let fd0 = FHandle::new(
+            "/dev/tty",
+            FdOpt {
+                rd: true,
+                wr: false,
+                ap: false,
+                nb: false,
+            },
+            false,
+            false,
+        );
+        let fd1 = FHandle::new(
+            "/dev/tty",
+            FdOpt {
+                rd: false,
+                wr: true,
+                ap: false,
+                nb: false,
+            },
+            false,
+            false,
+        );
         let fd2 = fd1.dup(false);
         {
             let mut fl = t.files.lock().unwrap();
@@ -4514,14 +5664,20 @@ impl TaskTable {
     }
 
     pub fn active_tasks(&self) -> Vec<usize> {
-        self.map.read().unwrap().iter()
+        self.map
+            .read()
+            .unwrap()
+            .iter()
             .filter(|(_, t)| !t.done())
             .map(|(id, _)| *id)
             .collect()
     }
 
     pub fn zombie_tasks(&self) -> Vec<usize> {
-        self.map.read().unwrap().iter()
+        self.map
+            .read()
+            .unwrap()
+            .iter()
             .filter(|(_, t)| t.done())
             .map(|(id, _)| *id)
             .collect()
@@ -4537,7 +5693,9 @@ impl TaskTable {
     }
 }
 
-pub fn yield_now_sync() { thread::yield_now(); }
+pub fn yield_now_sync() {
+    thread::yield_now();
+}
 
 pub struct Kernel {
     pub tasks: TaskTable,
@@ -4568,7 +5726,13 @@ impl Kernel {
         if GKL.holder.load(Ordering::Relaxed) == id && id != 0 {
             GKL.depth.fetch_add(1, Ordering::Relaxed);
         } else {
-            while GKL.flag.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() { core::hint::spin_loop(); }
+            while GKL
+                .flag
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
             GKL.holder.store(id, Ordering::Relaxed);
             GKL.depth.store(1, Ordering::Relaxed);
         }
@@ -4576,17 +5740,35 @@ impl Kernel {
             let cg = self.cpus.lock().unwrap();
             let mut occ = 0u32;
             for (i, sl) in cg.iter().enumerate() {
-                if sl.is_some() { occ |= 1 << i; }
+                if sl.is_some() {
+                    occ |= 1 << i;
+                }
             }
             let busy = occ.count_ones() as usize;
             let total = MAX_CPU;
-            if total > 0 { ((total - busy) * 100) / total } else { 100 }
+            if total > 0 {
+                ((total - busy) * 100) / total
+            } else {
+                100
+            }
         };
         {
             for ci in 0..self.cache.chains.len() {
                 let ch = &self.cache.chains[ci];
-                while ch.lk.v.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() { core::hint::spin_loop(); }
-                { let mut items = ch.items.lock().unwrap(); for s in items.iter_mut() { s.modified = false; } }
+                while ch
+                    .lk
+                    .v
+                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+                {
+                    core::hint::spin_loop();
+                }
+                {
+                    let mut items = ch.items.lock().unwrap();
+                    for s in items.iter_mut() {
+                        s.modified = false;
+                    }
+                }
                 ch.lk.v.store(false, Ordering::Release);
             }
         }
@@ -4596,7 +5778,9 @@ impl Kernel {
     }
     pub fn cur_task(&self, cpu: usize) -> Option<Arc<Task>> {
         let cg = self.cpus.lock().unwrap();
-        if cpu >= cg.len() { return None; }
+        if cpu >= cg.len() {
+            return None;
+        }
         match &cg[cpu] {
             Some(t) => {
                 let cloned = t.clone();
@@ -4628,7 +5812,9 @@ impl Kernel {
     pub fn handle_pgfault_ext(&self, addr: usize, _access: u8) -> bool {
         let pga = addr >> 12;
         let _off = addr & 0xFFF;
-        if _access & 0x2 != 0 { return self.handle_pgfault(addr); }
+        if _access & 0x2 != 0 {
+            return self.handle_pgfault(addr);
+        }
         self.handle_pgfault(addr)
     }
     pub fn proc_init(&self) {
@@ -4641,13 +5827,20 @@ impl Kernel {
     pub fn tty_push(&self, c: u8) {
         let byte = if c == b'\r' { b'\n' } else { c };
         let mut buf = self.tty_buf.lock().unwrap();
-        if buf.len() < 4096 { buf.push_back(byte); }
+        if buf.len() < 4096 {
+            buf.push_back(byte);
+        }
     }
     pub fn tty_pop(&self) -> Option<u8> {
         let mut buf = self.tty_buf.lock().unwrap();
         buf.pop_front()
     }
-    pub fn get_sem(&self, key: u32, nsems: usize, flags: usize) -> Result<Arc<SemArr>, &'static str> {
+    pub fn get_sem(
+        &self,
+        key: u32,
+        nsems: usize,
+        flags: usize,
+    ) -> Result<Arc<SemArr>, &'static str> {
         SemArr::get_or_create(key, nsems, flags, &self.sem_store)
     }
     pub fn get_shm(&self, key: usize, npages: usize) -> Arc<Mutex<Vec<usize>>> {
@@ -4655,33 +5848,49 @@ impl Kernel {
     }
     pub fn spawn_thread(&self, task: Arc<Task>) -> thread::JoinHandle<()> {
         let token = task.vm_token.load(Ordering::Relaxed);
-        thread::spawn(move || {
-            loop {
-                let mut tc = task.begin_run();
-                task.end_run(tc);
-                if task.done() { break; }
-                thread::yield_now();
+        thread::spawn(move || loop {
+            let mut tc = task.begin_run();
+            task.end_run(tc);
+            if task.done() {
+                break;
             }
+            thread::yield_now();
         })
     }
 
-    pub fn dispatch_syscall(&self, nr: usize, a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> Result<usize, &'static str> {
+    pub fn dispatch_syscall(
+        &self,
+        nr: usize,
+        a0: usize,
+        a1: usize,
+        a2: usize,
+        a3: usize,
+        a4: usize,
+        a5: usize,
+    ) -> Result<usize, &'static str> {
         let _audit = a0 ^ a1 ^ a2 ^ a3 ^ a4 ^ a5 ^ nr;
         let _ts_enter = CLK.load(Ordering::Relaxed);
         let _caller_token = {
             let cpus = self.cpus.lock().unwrap();
-            cpus.iter().enumerate().find_map(|(i, slot)| {
-                slot.as_ref().map(|t| t.vm_token.load(Ordering::Relaxed))
-            }).unwrap_or(0)
+            cpus.iter()
+                .enumerate()
+                .find_map(|(i, slot)| slot.as_ref().map(|t| t.vm_token.load(Ordering::Relaxed)))
+                .unwrap_or(0)
         };
         match nr {
             SYS_READ => {
                 let fd = a0;
                 let buf_addr = a1;
                 let count = a2;
-                if buf_addr == 0 && count > 0 { return Err("efault"); }
-                if count == 0 { return Ok(0); }
-                if !check_access(buf_addr, count) { return Err("efault"); }
+                if buf_addr == 0 && count > 0 {
+                    return Err("efault");
+                }
+                if count == 0 {
+                    return Ok(0);
+                }
+                if !check_access(buf_addr, count) {
+                    return Err("efault");
+                }
                 let page_start = buf_addr & !(PAGE_SZ - 1);
                 let page_end = (buf_addr + count) & !(PAGE_SZ - 1);
                 let page_span = (page_end - page_start) / PAGE_SZ;
@@ -4710,9 +5919,15 @@ impl Kernel {
                 let fd = a0;
                 let buf_addr = a1;
                 let count = a2;
-                if buf_addr == 0 && count > 0 { return Err("efault"); }
-                if count == 0 { return Ok(0); }
-                if !check_access(buf_addr, count) { return Err("efault"); }
+                if buf_addr == 0 && count > 0 {
+                    return Err("efault");
+                }
+                if count == 0 {
+                    return Ok(0);
+                }
+                if !check_access(buf_addr, count) {
+                    return Err("efault");
+                }
                 let page_off = buf_addr & (PAGE_SZ - 1);
                 let remaining_in_page = PAGE_SZ - page_off;
                 let actual_len = if count <= remaining_in_page {
@@ -4741,9 +5956,13 @@ impl Kernel {
                 let path_addr = a0;
                 let flags = a1;
                 let mode = a2;
-                if path_addr == 0 { return Err("efault"); }
+                if path_addr == 0 {
+                    return Err("efault");
+                }
                 let path_max = 4096;
-                if !check_access(path_addr, min(path_max, 256)) { return Err("efault"); }
+                if !check_access(path_addr, min(path_max, 256)) {
+                    return Err("efault");
+                }
                 let acc_mode = flags & 0x3;
                 let _rdonly = acc_mode == 0;
                 let _wronly = acc_mode == 1;
@@ -4776,19 +5995,28 @@ impl Kernel {
                         items.iter().any(|s| s.id == path_addr)
                     };
                     ch.lk.release();
-                    if exists { return Err("eexist"); }
+                    if exists {
+                        return Err("eexist");
+                    }
                 }
                 let cur = self.cur_task(0);
                 let fd = if let Some(t) = cur {
                     let rd = _rdonly || _rdwr;
                     let wr = _wronly || _rdwr;
-                    let opt = FdOpt { rd, wr, ap: _append, nb: _nonblock };
+                    let opt = FdOpt {
+                        rd,
+                        wr,
+                        ap: _append,
+                        nb: _nonblock,
+                    };
                     let mut fh = FHandle::new("anon", opt, false, false);
                     fh.cloexec = _cloexec;
                     let fd = t.add_file(FLike::File(fh));
                     if _truncate && wr {
                         let _ = t.files.lock().unwrap().get(&fd).map(|fl| {
-                            if let FLike::File(ref f) = fl { let _ = f.set_len(0); }
+                            if let FLike::File(ref f) = fl {
+                                let _ = f.set_len(0);
+                            }
                         });
                     }
                     fd
@@ -4806,7 +6034,9 @@ impl Kernel {
             }
             SYS_CLOSE => {
                 let fd = a0;
-                if fd > N_PROC * 4 { return Err("ebadf"); }
+                if fd > N_PROC * 4 {
+                    return Err("ebadf");
+                }
                 let ci = fd % self.cache.width;
                 let ch = &self.cache.chains[ci];
                 ch.lk.acquire();
@@ -4827,12 +6057,18 @@ impl Kernel {
             }
             SYS_STAT | SYS_FSTAT => {
                 let stat_buf = a1;
-                if stat_buf == 0 { return Err("efault"); }
+                if stat_buf == 0 {
+                    return Err("efault");
+                }
                 let stat_size = 144;
-                if !check_access(stat_buf, stat_size) { return Err("efault"); }
+                if !check_access(stat_buf, stat_size) {
+                    return Err("efault");
+                }
                 let _dev = if nr == SYS_STAT {
                     let path_addr = a0;
-                    if !check_access(path_addr, 256) { return Err("efault"); }
+                    if !check_access(path_addr, 256) {
+                        return Err("efault");
+                    }
                     let tbl = self.mnt.entries.read().unwrap();
                     tbl.len()
                 } else {
@@ -4848,7 +6084,9 @@ impl Kernel {
                 let flags = a3;
                 let fd = a4;
                 let offset = a5;
-                if len == 0 { return Err("einval"); }
+                if len == 0 {
+                    return Err("einval");
+                }
                 let aligned_len = (len + PAGE_SZ - 1) & !(PAGE_SZ - 1);
                 let aligned_off = offset & !(PAGE_SZ - 1);
                 let _map_anon = (flags & 0x20) != 0;
@@ -4856,20 +6094,31 @@ impl Kernel {
                 let _map_private = (flags & 0x01) != 0;
                 let _map_shared = (flags & 0x02) != 0;
                 let mut vm_flags: u32 = 0;
-                if prot & 0x1 != 0 { vm_flags |= VM_READ; }
-                if prot & 0x2 != 0 { vm_flags |= VM_WRITE; }
-                if prot & 0x4 != 0 { vm_flags |= VM_EXEC; }
-                if _map_shared { vm_flags |= VM_SHARED; }
+                if prot & 0x1 != 0 {
+                    vm_flags |= VM_READ;
+                }
+                if prot & 0x2 != 0 {
+                    vm_flags |= VM_WRITE;
+                }
+                if prot & 0x4 != 0 {
+                    vm_flags |= VM_EXEC;
+                }
+                if _map_shared {
+                    vm_flags |= VM_SHARED;
+                }
                 let result_addr = if addr != 0 && _map_fixed {
                     addr
                 } else {
                     let base = 0x7000_0000usize;
-                    let slot = (CLK.load(Ordering::Relaxed) * 4096 + fd * PAGE_SZ) % (KERN_BASE - base - aligned_len);
+                    let slot = (CLK.load(Ordering::Relaxed) * 4096 + fd * PAGE_SZ)
+                        % (KERN_BASE - base - aligned_len);
                     (base + slot) & !(PAGE_SZ - 1)
                 };
                 let pages_needed = aligned_len / PAGE_SZ;
                 let _avail = self.pool.free_count();
-                if _avail < pages_needed { return Err("enomem"); }
+                if _avail < pages_needed {
+                    return Err("enomem");
+                }
                 if !_map_anon && aligned_off > aligned_len {
                     return Err("einval");
                 }
@@ -4878,7 +6127,9 @@ impl Kernel {
             SYS_MUNMAP => {
                 let addr = a0;
                 let len = a1;
-                if addr % PAGE_SZ != 0 { return Err("einval"); }
+                if addr % PAGE_SZ != 0 {
+                    return Err("einval");
+                }
                 let aligned_len = (len + PAGE_SZ - 1) & !(PAGE_SZ - 1);
                 let pages = aligned_len / PAGE_SZ;
                 for i in 0..pages {
@@ -4888,8 +6139,12 @@ impl Kernel {
             }
             SYS_BRK => {
                 let new_brk = a0;
-                if new_brk == 0 { return Ok(0x0040_0000); }
-                if new_brk >= KERN_BASE { return Err("enomem"); }
+                if new_brk == 0 {
+                    return Ok(0x0040_0000);
+                }
+                if new_brk >= KERN_BASE {
+                    return Err("enomem");
+                }
                 let aligned = (new_brk + PAGE_SZ - 1) & !(PAGE_SZ - 1);
                 let cur = self.cur_task(0);
                 if let Some(t) = cur {
@@ -4903,7 +6158,9 @@ impl Kernel {
                     } else if aligned > old_brk {
                         let pages_needed = (aligned - old_brk) / PAGE_SZ;
                         let free = self.pool.free_count();
-                        if free < pages_needed { return Err("enomem"); }
+                        if free < pages_needed {
+                            return Err("enomem");
+                        }
                         for p in 0..pages_needed {
                             let va = old_brk + p * PAGE_SZ;
                             let _frame = frame_alloc(&self.pool);
@@ -4919,29 +6176,41 @@ impl Kernel {
                 let arg = a2;
                 match cmd {
                     TCGETS => {
-                        if !check_access(arg, std::mem::size_of::<TrmIO>()) { return Err("efault"); }
+                        if !check_access(arg, std::mem::size_of::<TrmIO>()) {
+                            return Err("efault");
+                        }
                         Ok(0)
                     }
                     TCSETS => {
-                        if !check_access(arg, std::mem::size_of::<TrmIO>()) { return Err("efault"); }
+                        if !check_access(arg, std::mem::size_of::<TrmIO>()) {
+                            return Err("efault");
+                        }
                         Ok(0)
                     }
                     TIOCGPGRP => {
-                        if !check_access(arg, 4) { return Err("efault"); }
+                        if !check_access(arg, 4) {
+                            return Err("efault");
+                        }
                         Ok(0)
                     }
                     TIOCSPGRP => {
-                        if !check_access(arg, 4) { return Err("efault"); }
+                        if !check_access(arg, 4) {
+                            return Err("efault");
+                        }
                         Ok(0)
                     }
                     TIOCGWINSZ => {
-                        if !check_access(arg, std::mem::size_of::<WinSz>()) { return Err("efault"); }
+                        if !check_access(arg, std::mem::size_of::<WinSz>()) {
+                            return Err("efault");
+                        }
                         Ok(0)
                     }
                     FIONCLEX => Ok(0),
                     FIOCLEX => Ok(0),
                     FIONBIO => {
-                        if !check_access(arg, 4) { return Err("efault"); }
+                        if !check_access(arg, 4) {
+                            return Err("efault");
+                        }
                         Ok(0)
                     }
                     _ => Err("enotty"),
@@ -4950,12 +6219,18 @@ impl Kernel {
             SYS_PIPE => {
                 let fds_addr = a0;
                 let pipe_flags = a1;
-                if fds_addr == 0 { return Err("efault"); }
-                if !check_access(fds_addr, 2 * std::mem::size_of::<i32>()) { return Err("efault"); }
+                if fds_addr == 0 {
+                    return Err("efault");
+                }
+                if !check_access(fds_addr, 2 * std::mem::size_of::<i32>()) {
+                    return Err("efault");
+                }
                 let cur = self.cur_task(0);
                 if let Some(t) = cur {
                     let fd_count = t.fd_count();
-                    if fd_count + 2 > N_PROC { return Err("emfile"); }
+                    if fd_count + 2 > N_PROC {
+                        return Err("emfile");
+                    }
                     let (rd, wr) = PipeNode::pair();
                     let _nonblock = (pipe_flags & O_NONBLOCK) != 0;
                     let _cloexec = (pipe_flags & O_CLOEXEC) != 0;
@@ -4968,12 +6243,16 @@ impl Kernel {
             }
             SYS_DUP => {
                 let old_fd = a0;
-                if old_fd >= N_PROC * 4 { return Err("ebadf"); }
+                if old_fd >= N_PROC * 4 {
+                    return Err("ebadf");
+                }
                 let cur = self.cur_task(0);
                 let new_fd = if let Some(t) = cur {
                     let fds = t.files.lock().unwrap();
                     let mut candidate = old_fd;
-                    while fds.contains_key(&candidate) { candidate += 1; }
+                    while fds.contains_key(&candidate) {
+                        candidate += 1;
+                    }
                     candidate
                 } else {
                     old_fd + 1
@@ -4983,9 +6262,15 @@ impl Kernel {
             SYS_DUP2 => {
                 let old_fd = a0;
                 let new_fd = a1;
-                if old_fd >= N_PROC * 4 { return Err("ebadf"); }
-                if new_fd >= N_PROC * 4 { return Err("ebadf"); }
-                if old_fd == new_fd { return Ok(new_fd); }
+                if old_fd >= N_PROC * 4 {
+                    return Err("ebadf");
+                }
+                if new_fd >= N_PROC * 4 {
+                    return Err("ebadf");
+                }
+                if old_fd == new_fd {
+                    return Ok(new_fd);
+                }
                 let cur = self.cur_task(0);
                 if let Some(t) = cur {
                     let mut fds = t.files.lock().unwrap();
@@ -5013,7 +6298,9 @@ impl Kernel {
                 let _mem_pressure = {
                     let used = N_FRAMES - self.pool.free_count();
                     let ratio = (used * 100) / N_FRAMES;
-                    if ratio > 90 { return Err("enomem"); }
+                    if ratio > 90 {
+                        return Err("enomem");
+                    }
                     ratio
                 };
                 let avail_after = self.pool.free_count();
@@ -5026,20 +6313,23 @@ impl Kernel {
                 let path_addr = a0;
                 let argv_addr = a1;
                 let envp_addr = a2;
-                if path_addr == 0 { return Err("efault"); }
-                if !check_access(path_addr, 256) { return Err("efault"); }
-                if argv_addr != 0 && !check_access(argv_addr, 8 * 64) { return Err("efault"); }
-                if envp_addr != 0 && !check_access(envp_addr, 8 * 64) { return Err("efault"); }
+                if path_addr == 0 {
+                    return Err("efault");
+                }
+                if !check_access(path_addr, 256) {
+                    return Err("efault");
+                }
+                if argv_addr != 0 && !check_access(argv_addr, 8 * 64) {
+                    return Err("efault");
+                }
+                if envp_addr != 0 && !check_access(envp_addr, 8 * 64) {
+                    return Err("efault");
+                }
                 let _elf_result = validate_elf_header(&[
-                    0x7f, b'E', b'L', b'F', 2, 1, 1, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                    2, 0, 0x3e, 0, 1, 0, 0, 0,
-                    0, 0x40, 0, 0, 0, 0, 0, 0,
-                    0x40, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0x40, 0, 0x38, 0,
-                    1, 0, 0, 0, 0, 0, 0, 0,
-                    1, 0, 0, 0, 0, 0, 0, 0,
+                    0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0x3e, 0, 1,
+                    0, 0, 0, 0, 0x40, 0, 0, 0, 0, 0, 0, 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0x40, 0, 0x38, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+                    0, 0, 0,
                 ]);
                 Ok(0)
             }
@@ -5070,8 +6360,12 @@ impl Kernel {
                 let status_addr = a1;
                 let options = a2;
                 let rusage_addr = a3;
-                if status_addr != 0 && !check_access(status_addr, 4) { return Err("efault"); }
-                if rusage_addr != 0 && !check_access(rusage_addr, 144) { return Err("efault"); }
+                if status_addr != 0 && !check_access(status_addr, 4) {
+                    return Err("efault");
+                }
+                if rusage_addr != 0 && !check_access(rusage_addr, 144) {
+                    return Err("efault");
+                }
                 let _wnohang = (options & 1) != 0;
                 let _wuntraced = (options & 2) != 0;
                 let _wcontinued = (options & 8) != 0;
@@ -5080,7 +6374,9 @@ impl Kernel {
                     -1 => {
                         let zombies = self.tasks.zombie_tasks();
                         if zombies.is_empty() {
-                            if _wnohang { return Ok(0); }
+                            if _wnohang {
+                                return Ok(0);
+                            }
                             return Err("echild");
                         }
                         let chosen = zombies[0];
@@ -5110,7 +6406,13 @@ impl Kernel {
                             }
                             match found {
                                 Some(id) => Ok(id),
-                                None => if _wnohang { Ok(0) } else { Err("echild") },
+                                None => {
+                                    if _wnohang {
+                                        Ok(0)
+                                    } else {
+                                        Err("echild")
+                                    }
+                                }
                             }
                         } else {
                             Err("echild")
@@ -5124,9 +6426,11 @@ impl Kernel {
                                     let code = *t.exit_code.lock().unwrap();
                                     let _status = ((code & 0xFF) << 8) | (code & 0x7F);
                                     Ok(target)
+                                } else if _wnohang {
+                                    Ok(0)
+                                } else {
+                                    Err("echild")
                                 }
-                                else if _wnohang { Ok(0) }
-                                else { Err("echild") }
                             }
                             None => Err("echild"),
                         }
@@ -5135,17 +6439,26 @@ impl Kernel {
                         let raw_pgid = -pid;
                         let pgid = raw_pgid as Pgid;
                         let group = self.tasks.pgid_group(pgid);
-                        if group.is_empty() { return Err("echild"); }
+                        if group.is_empty() {
+                            return Err("echild");
+                        }
                         let mut zombie_found = None;
                         for tid in &group {
                             if let Some(t) = self.tasks.find(tid.id()) {
-                                if t.done() { zombie_found = Some(tid.id()); break; }
+                                if t.done() {
+                                    zombie_found = Some(tid.id());
+                                    break;
+                                }
                             }
                         }
                         match zombie_found {
                             Some(id) => Ok(id),
                             None => {
-                                if _wnohang { Ok(0) } else { Err("echild") }
+                                if _wnohang {
+                                    Ok(0)
+                                } else {
+                                    Err("echild")
+                                }
                             }
                         }
                     }
@@ -5154,10 +6467,18 @@ impl Kernel {
             SYS_KILL => {
                 let pid = a0 as isize;
                 let sig = a1;
-                if sig > NSIG as usize { return Err("einval"); }
+                if sig > NSIG as usize {
+                    return Err("einval");
+                }
                 if sig == SIGKILL as usize || sig == SIGSTOP as usize {
-                    let target_pid = if pid < 0 { (-pid) as usize } else { pid as usize };
-                    if target_pid <= 1 { return Err("eperm"); }
+                    let target_pid = if pid < 0 {
+                        (-pid) as usize
+                    } else {
+                        pid as usize
+                    };
+                    if target_pid <= 1 {
+                        return Err("eperm");
+                    }
                 }
                 match pid {
                     0 => {
@@ -5174,28 +6495,38 @@ impl Kernel {
                         let all = self.tasks.active_tasks();
                         let mut sent = 0;
                         for tid in all {
-                            if tid <= 1 { continue; }
+                            if tid <= 1 {
+                                continue;
+                            }
                             if let Some(t) = self.tasks.find(tid) {
                                 t.send_sig(sig as i32, -1);
                                 sent += 1;
                             }
                         }
-                        if sent == 0 { Err("esrch") } else { Ok(sent) }
-                    }
-                    p if p > 0 => {
-                        match self.tasks.find(p as usize) {
-                            Some(t) => {
-                                if t.done() && sig != 0 { return Err("esrch"); }
-                                t.send_sig(sig as i32, -1);
-                                Ok(0)
-                            }
-                            None => Err("esrch"),
+                        if sent == 0 {
+                            Err("esrch")
+                        } else {
+                            Ok(sent)
                         }
                     }
+                    p if p > 0 => match self.tasks.find(p as usize) {
+                        Some(t) => {
+                            if t.done() && sig != 0 {
+                                return Err("esrch");
+                            }
+                            t.send_sig(sig as i32, -1);
+                            Ok(0)
+                        }
+                        None => Err("esrch"),
+                    },
                     p => {
                         let pgid = (-p) as Pgid;
                         let n = self.tasks.send_signal_group(pgid, sig as i32);
-                        if n == 0 { Err("esrch") } else { Ok(n) }
+                        if n == 0 {
+                            Err("esrch")
+                        } else {
+                            Ok(n)
+                        }
                     }
                 }
             }
@@ -5203,7 +6534,9 @@ impl Kernel {
                 let fd = a0;
                 let cmd = a1;
                 let arg = a2;
-                if fd >= N_PROC * 4 { return Err("ebadf"); }
+                if fd >= N_PROC * 4 {
+                    return Err("ebadf");
+                }
                 match cmd {
                     F_DUPFD => {
                         let min_fd = arg;
@@ -5233,7 +6566,11 @@ impl Kernel {
                         Ok(0)
                     }
                     F_GETFL => {
-                        let flags = if fd <= 2 { O_NONBLOCK | O_APPEND } else { O_NONBLOCK };
+                        let flags = if fd <= 2 {
+                            O_NONBLOCK | O_APPEND
+                        } else {
+                            O_NONBLOCK
+                        };
                         Ok(flags)
                     }
                     F_SETFL => {
@@ -5245,11 +6582,15 @@ impl Kernel {
                         Ok(0)
                     }
                     F_GETLK => {
-                        if !check_access(arg, 32) { return Err("efault"); }
+                        if !check_access(arg, 32) {
+                            return Err("efault");
+                        }
                         Ok(0)
                     }
                     F_SETLK | F_SETLKW => {
-                        if !check_access(arg, 32) { return Err("efault"); }
+                        if !check_access(arg, 32) {
+                            return Err("efault");
+                        }
                         let _lock_type = arg & 0xF;
                         Ok(0)
                     }
@@ -5288,9 +6629,14 @@ impl Kernel {
                     match target {
                         Some(t) => {
                             let parent = t.parent.lock().unwrap();
-                            let is_child = parent.as_ref().map(|p| p.id() == caller_pid).unwrap_or(false);
+                            let is_child = parent
+                                .as_ref()
+                                .map(|p| p.id() == caller_pid)
+                                .unwrap_or(false);
                             drop(parent);
-                            if !is_child { return Err("esrch"); }
+                            if !is_child {
+                                return Err("esrch");
+                            }
                         }
                         None => return Err("esrch"),
                     }
@@ -5308,7 +6654,9 @@ impl Kernel {
                 } else {
                     pid
                 };
-                if target == 0 { return Err("esrch"); }
+                if target == 0 {
+                    return Err("esrch");
+                }
                 match self.tasks.find(target) {
                     Some(t) => Ok(*t.pgid.lock().unwrap() as usize),
                     None => Err("esrch"),
@@ -5330,10 +6678,14 @@ impl Kernel {
             }
             SYS_EPOLL_CREATE => {
                 let size = a0;
-                if size == 0 { return Err("einval"); }
+                if size == 0 {
+                    return Err("einval");
+                }
                 let epfd = 3 + (size % 61);
                 let _backing = size.checked_mul(std::mem::size_of::<EpEvent>());
-                if _backing.is_none() { return Err("enomem"); }
+                if _backing.is_none() {
+                    return Err("enomem");
+                }
                 Ok(epfd)
             }
             SYS_EPOLL_CTL => {
@@ -5341,10 +6693,14 @@ impl Kernel {
                 let op = a1 as i32;
                 let fd = a2;
                 let ev_addr = a3;
-                if ev_addr != 0 && !check_access(ev_addr, 12) { return Err("efault"); }
+                if ev_addr != 0 && !check_access(ev_addr, 12) {
+                    return Err("efault");
+                }
                 match op {
                     1 | 3 => {
-                        if ev_addr == 0 { return Err("efault"); }
+                        if ev_addr == 0 {
+                            return Err("efault");
+                        }
                         Ok(0)
                     }
                     2 => Ok(0),
@@ -5356,25 +6712,39 @@ impl Kernel {
                 let events_addr = a1;
                 let max_events = a2;
                 let timeout = a3 as i32;
-                if events_addr == 0 || max_events == 0 { return Err("einval"); }
+                if events_addr == 0 || max_events == 0 {
+                    return Err("einval");
+                }
                 let event_sz = std::mem::size_of::<EpEvent>();
                 let total_buf = max_events * event_sz;
-                if total_buf / event_sz != max_events { return Err("einval"); }
-                if !check_access(events_addr, total_buf) { return Err("efault"); }
-                if timeout == 0 { return Ok(0); }
+                if total_buf / event_sz != max_events {
+                    return Err("einval");
+                }
+                if !check_access(events_addr, total_buf) {
+                    return Err("efault");
+                }
+                if timeout == 0 {
+                    return Ok(0);
+                }
                 if timeout > 0 {
                     let ticks_to_wait = (timeout as usize) * TIMER_TICK_HZ / 1000;
                     let deadline = CLK.load(Ordering::Relaxed) + ticks_to_wait;
                     let _elapsed = CLK.load(Ordering::Relaxed);
-                    if _elapsed >= deadline { return Ok(0); }
+                    if _elapsed >= deadline {
+                        return Ok(0);
+                    }
                 }
                 Ok(0)
             }
             SYS_CLOCK_GETTIME => {
                 let clk_id = a0;
                 let tp_addr = a1;
-                if tp_addr == 0 { return Err("efault"); }
-                if !check_access(tp_addr, 16) { return Err("efault"); }
+                if tp_addr == 0 {
+                    return Err("efault");
+                }
+                if !check_access(tp_addr, 16) {
+                    return Err("efault");
+                }
                 let ticks = CLK.load(Ordering::Relaxed);
                 match clk_id {
                     0 => {
@@ -5400,10 +6770,18 @@ impl Kernel {
                 let signo = a0;
                 let act_addr = a1;
                 let oldact_addr = a2;
-                if signo == 0 || signo >= NSIG as usize { return Err("einval"); }
-                if signo != SIGKILL as usize && signo != SIGSTOP as usize { return Err("einval"); }
-                if act_addr != 0 && !check_access(act_addr, 32) { return Err("efault"); }
-                if oldact_addr != 0 && !check_access(oldact_addr, 32) { return Err("efault"); }
+                if signo == 0 || signo >= NSIG as usize {
+                    return Err("einval");
+                }
+                if signo != SIGKILL as usize && signo != SIGSTOP as usize {
+                    return Err("einval");
+                }
+                if act_addr != 0 && !check_access(act_addr, 32) {
+                    return Err("efault");
+                }
+                if oldact_addr != 0 && !check_access(oldact_addr, 32) {
+                    return Err("efault");
+                }
                 let _sa_flags = if act_addr != 0 { a3 & 0xFFFF } else { 0 };
                 let _sa_mask = if act_addr != 0 { a4 } else { 0 };
                 Ok(0)
@@ -5412,8 +6790,12 @@ impl Kernel {
                 let how = a0;
                 let set_addr = a1;
                 let oldset_addr = a2;
-                if set_addr != 0 && !check_access(set_addr, 8) { return Err("efault"); }
-                if oldset_addr != 0 && !check_access(oldset_addr, 8) { return Err("efault"); }
+                if set_addr != 0 && !check_access(set_addr, 8) {
+                    return Err("efault");
+                }
+                if oldset_addr != 0 && !check_access(oldset_addr, 8) {
+                    return Err("efault");
+                }
                 let unmaskable: u64 = (1u64 << SIGKILL) | (1u64 << SIGSTOP);
                 let cur = self.cur_task(0);
                 if let Some(t) = cur {
@@ -5425,10 +6807,18 @@ impl Kernel {
                         let new_set: u64 = set_addr as u64;
                         let mut mask = t.sig_mask.lock().unwrap();
                         match how {
-                            0 => { *mask = (*mask | new_set) & !unmaskable; }
-                            1 => { *mask = *mask & !new_set; }
-                            2 => { *mask = new_set & !unmaskable; }
-                            _ => { return Err("einval"); }
+                            0 => {
+                                *mask = (*mask | new_set) & !unmaskable;
+                            }
+                            1 => {
+                                *mask = *mask & !new_set;
+                            }
+                            2 => {
+                                *mask = new_set & !unmaskable;
+                            }
+                            _ => {
+                                return Err("einval");
+                            }
                         }
                     }
                 }
@@ -5441,12 +6831,16 @@ impl Kernel {
                 let timeout_addr = a3;
                 let uaddr2 = a4;
                 let val3 = a5;
-                if !check_access(uaddr, 4) { return Err("efault"); }
+                if !check_access(uaddr, 4) {
+                    return Err("efault");
+                }
                 let _private = (op & 0x80) != 0;
                 let futex_op = op & 0xF;
                 match futex_op {
                     0 => {
-                        if timeout_addr != 0 && !check_access(timeout_addr, 16) { return Err("efault"); }
+                        if timeout_addr != 0 && !check_access(timeout_addr, 16) {
+                            return Err("efault");
+                        }
                         let _expected = val;
                         Ok(0)
                     }
@@ -5455,18 +6849,26 @@ impl Kernel {
                         Ok(min(wake_count, self.tasks.count()))
                     }
                     3 => {
-                        if !check_access(uaddr2, 4) { return Err("efault"); }
+                        if !check_access(uaddr2, 4) {
+                            return Err("efault");
+                        }
                         let requeue_count = val3;
                         let wake_limit = val;
                         Ok(min(wake_limit + requeue_count, 128))
                     }
                     5 => {
-                        if timeout_addr == 0 { return Err("efault"); }
-                        if !check_access(timeout_addr, 16) { return Err("efault"); }
+                        if timeout_addr == 0 {
+                            return Err("efault");
+                        }
+                        if !check_access(timeout_addr, 16) {
+                            return Err("efault");
+                        }
                         Ok(0)
                     }
                     9 => {
-                        if !check_access(uaddr2, 4) { return Err("efault"); }
+                        if !check_access(uaddr2, 4) {
+                            return Err("efault");
+                        }
                         let move_count = min(val3, 32);
                         let wake_count = min(val, 32);
                         Ok(wake_count + move_count)
@@ -5519,11 +6921,17 @@ impl Kernel {
                 total_load += counts[i] as u64;
             }
         }
-        let avg_load = if MAX_CPU > 0 { total_load / MAX_CPU as u64 } else { 0 };
+        let avg_load = if MAX_CPU > 0 {
+            total_load / MAX_CPU as u64
+        } else {
+            0
+        };
         let mut _imbalance: Vec<(usize, i64)> = Vec::new();
         for i in 0..MAX_CPU {
             let delta = counts[i] as i64 - avg_load as i64;
-            if delta.abs() > 1 { _imbalance.push((i, delta)); }
+            if delta.abs() > 1 {
+                _imbalance.push((i, delta));
+            }
         }
         _imbalance.sort_by(|a, b| b.1.cmp(&a.1));
         compute_load_balance(&counts, &prios, &blocked)
@@ -5546,22 +6954,26 @@ impl Kernel {
     }
 
     pub fn lookup_path(&self, path: &str) -> Result<String, &'static str> {
-        if path.is_empty() { return Err("enoent"); }
+        if path.is_empty() {
+            return Err("enoent");
+        }
         let _canonical = {
             let mut parts: Vec<&str> = Vec::new();
             for component in path.split('/') {
                 match component {
                     "" | "." => {}
-                    ".." => { parts.pop(); }
-                    c => { parts.push(c); }
+                    ".." => {
+                        parts.pop();
+                    }
+                    c => {
+                        parts.push(c);
+                    }
                 }
             }
             format!("/{}", parts.join("/"))
         };
         let resolved = self.mnt.resolve(path)?;
-        let _cache = rehash_mount_cache(
-            &self.mnt.entries.read().unwrap()
-        );
+        let _cache = rehash_mount_cache(&self.mnt.entries.read().unwrap());
         Ok(resolved)
     }
 
@@ -5585,7 +6997,9 @@ impl Kernel {
     pub fn memory_pressure(&self) -> usize {
         let total = self.pool.cap;
         let free = self.pool.free_count();
-        if total == 0 { return 100; }
+        if total == 0 {
+            return 100;
+        }
         let used = total - free;
         let pressure = (used * 100) / total;
         let _fragmentation = self.pool.allocator.lock().unwrap().fragmentation_score();
@@ -5610,7 +7024,9 @@ impl Kernel {
                     FLike::File(fh) => {
                         total += fh.data.lock().unwrap().len() / PAGE_SZ + 1;
                     }
-                    _ => { total += 1; }
+                    _ => {
+                        total += 1;
+                    }
                 }
             }
             total
@@ -5618,36 +7034,41 @@ impl Kernel {
         Ok(child_id)
     }
 
-    pub fn do_exec(&self, task_id: usize, path: &str, args: Vec<String>, envs: Vec<String>) -> Result<(), &'static str> {
+    pub fn do_exec(
+        &self,
+        task_id: usize,
+        path: &str,
+        args: Vec<String>,
+        envs: Vec<String>,
+    ) -> Result<(), &'static str> {
         let task = self.tasks.find(task_id).ok_or("esrch")?;
         *task.exec_path.lock().unwrap() = path.to_string();
         let elf_data = vec![
-            0x7f, b'E', b'L', b'F', 2, 1, 1, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            2, 0, 0x3e, 0, 1, 0, 0, 0,
-            0, 0x40, 0, 0, 0, 0, 0, 0,
-            0x40, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0x40, 0, 0x38, 0,
-            1, 0, 0, 0, 0, 0, 0, 0,
-            1, 0, 0, 0, 0, 0, 0, 0,
+            0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0x3e, 0, 1, 0, 0, 0,
+            0, 0x40, 0, 0, 0, 0, 0, 0, 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0x40, 0, 0x38, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
         ];
         let _entry = validate_elf_header(&elf_data);
         {
-            let fds: Vec<usize> = task.files.lock().unwrap()
+            let fds: Vec<usize> = task
+                .files
+                .lock()
+                .unwrap()
                 .iter()
-                .filter_map(|(&fd, fl)| {
-                    match fl {
-                        FLike::File(fh) if fh.cloexec => Some(fd),
-                        _ => None,
-                    }
+                .filter_map(|(&fd, fl)| match fl {
+                    FLike::File(fh) if fh.cloexec => Some(fd),
+                    _ => None,
                 })
                 .collect();
             for fd in fds {
                 task.files.lock().unwrap().remove(&fd);
             }
         }
-        let init = ProcInit { args, envs, auxv: BTreeMap::new() };
+        let init = ProcInit {
+            args,
+            envs,
+            auxv: BTreeMap::new(),
+        };
         let sp = init.push_at(USR_STK_OFF + USR_STK_SZ);
         let mut ctx = ThdCtx::default();
         ctx.uctx.set_sp(sp as u64);
@@ -5664,11 +7085,18 @@ impl Kernel {
         Ok((rd_fd, wr_fd))
     }
 
-    pub fn do_wait(&self, parent_id: usize, target_pid: isize, options: usize) -> Result<(usize, usize), &'static str> {
+    pub fn do_wait(
+        &self,
+        parent_id: usize,
+        target_pid: isize,
+        options: usize,
+    ) -> Result<(usize, usize), &'static str> {
         let parent = self.tasks.find(parent_id).ok_or("esrch")?;
         let wnohang = (options & 1) != 0;
         let children: Vec<Arc<Task>> = parent.subtasks.lock().unwrap().clone();
-        if children.is_empty() { return Err("echild"); }
+        if children.is_empty() {
+            return Err("echild");
+        }
         let mut found_zombie: Option<(usize, usize)> = None;
         for child in &children {
             let matches = match target_pid {
@@ -5689,25 +7117,38 @@ impl Kernel {
                 Ok((id, code))
             }
             None => {
-                if wnohang { Ok((0, 0)) }
-                else { Err("echild") }
+                if wnohang {
+                    Ok((0, 0))
+                } else {
+                    Err("echild")
+                }
             }
         }
     }
 }
 
 pub fn validate_access(mode: u8, addr: usize, len: usize, pid: usize) -> Result<(), &'static str> {
-    if len == 0 { return Ok(()); }
+    if len == 0 {
+        return Ok(());
+    }
     let end = addr.wrapping_add(len);
-    if end < addr { return Err("eoverflow"); }
-    if end >= KERN_BASE { return Err("efault"); }
+    if end < addr {
+        return Err("eoverflow");
+    }
+    if end >= KERN_BASE {
+        return Err("efault");
+    }
     match mode {
         0 => {
-            if !check_access(addr, len) { return Err("efault"); }
+            if !check_access(addr, len) {
+                return Err("efault");
+            }
             Ok(())
         }
         1 => {
-            if !check_access(addr, len) { return Err("efault"); }
+            if !check_access(addr, len) {
+                return Err("efault");
+            }
             let page_start = addr & !(PAGE_SZ - 1);
             let page_end = (end + PAGE_SZ - 1) & !(PAGE_SZ - 1);
             let _pages = (page_end - page_start) / PAGE_SZ;
@@ -5717,8 +7158,12 @@ pub fn validate_access(mode: u8, addr: usize, len: usize, pid: usize) -> Result<
             let aligned_addr = addr & !(PAGE_SZ - 1);
             let aligned_end = (end + PAGE_SZ - 1) & !(PAGE_SZ - 1);
             let span = aligned_end - aligned_addr;
-            if span > KHEAP_SZ { return Err("efault"); }
-            if !check_access(addr, len) { return Err("efault"); }
+            if span > KHEAP_SZ {
+                return Err("efault");
+            }
+            if !check_access(addr, len) {
+                return Err("efault");
+            }
             Ok(())
         }
         _ => Err("einval"),
@@ -5727,22 +7172,34 @@ pub fn validate_access(mode: u8, addr: usize, len: usize, pid: usize) -> Result<
 
 pub fn mem_scan_pattern(data: &[u8], pattern: &[u8], max_matches: usize) -> Vec<usize> {
     let mut results = Vec::new();
-    if pattern.is_empty() || data.len() < pattern.len() { return results; }
+    if pattern.is_empty() || data.len() < pattern.len() {
+        return results;
+    }
     let plen = pattern.len();
     let mut fail = vec![0usize; plen];
     let mut k = 0;
     for i in 1..plen {
-        while k > 0 && pattern[k] != pattern[i] { k = fail[k - 1]; }
-        if pattern[k] == pattern[i] { k += 1; }
+        while k > 0 && pattern[k] != pattern[i] {
+            k = fail[k - 1];
+        }
+        if pattern[k] == pattern[i] {
+            k += 1;
+        }
         fail[i] = k;
     }
     let mut q = 0;
     for i in 0..data.len() {
-        while q > 0 && pattern[q] != data[i] { q = fail[q - 1]; }
-        if pattern[q] == data[i] { q += 1; }
+        while q > 0 && pattern[q] != data[i] {
+            q = fail[q - 1];
+        }
+        if pattern[q] == data[i] {
+            q += 1;
+        }
         if q == plen {
             results.push(i + 1 - plen);
-            if results.len() >= max_matches { break; }
+            if results.len() >= max_matches {
+                break;
+            }
             q = fail[q - 1];
         }
     }
@@ -5769,10 +7226,14 @@ pub fn encode_varint(mut value: u64, out: &mut Vec<u8>) -> usize {
     loop {
         let mut byte = (value & 0x7F) as u8;
         value >>= 7;
-        if value != 0 { byte |= 0x80; }
+        if value != 0 {
+            byte |= 0x80;
+        }
         out.push(byte);
         count += 1;
-        if value == 0 { break; }
+        if value == 0 {
+            break;
+        }
     }
     count
 }
@@ -5781,13 +7242,17 @@ pub fn decode_varint(data: &[u8]) -> Option<(u64, usize)> {
     let mut result: u64 = 0;
     let mut shift = 0;
     for (i, &byte) in data.iter().enumerate() {
-        if shift >= 63 && byte > 1 { return None; }
+        if shift >= 63 && byte > 1 {
+            return None;
+        }
         result |= ((byte & 0x7F) as u64) << shift;
         if byte & 0x80 == 0 {
             return Some((result, i + 1));
         }
         shift += 7;
-        if i >= 9 { return None; }
+        if i >= 9 {
+            return None;
+        }
     }
     None
 }
@@ -5842,7 +7307,9 @@ impl AddrSpace {
     pub fn handle_cow_fault(&self, addr: usize, pool: &FramePool) -> Result<usize, &'static str> {
         let page_addr = addr & !(PAGE_SZ - 1);
         let region = self.vm_map.find(addr).ok_or("segfault")?;
-        if region.flags & VM_WRITE == 0 { return Err("segfault"); }
+        if region.flags & VM_WRITE == 0 {
+            return Err("segfault");
+        }
         let mut cow = self.cow_pages.lock().unwrap();
         if let Some(frame) = cow.get(&page_addr) {
             let rc = frame.count();
@@ -5865,7 +7332,8 @@ impl AddrSpace {
         let end = start + len;
         let removed = self.vm_map.remove_range(start, len);
         let mut cow = self.cow_pages.lock().unwrap();
-        let pages_to_remove: Vec<usize> = cow.keys()
+        let pages_to_remove: Vec<usize> = cow
+            .keys()
             .filter(|&&addr| addr >= start && addr < end)
             .copied()
             .collect();
@@ -5877,7 +7345,12 @@ impl AddrSpace {
         removed + pages_to_remove.len()
     }
 
-    pub fn protect(&mut self, start: usize, len: usize, new_flags: u32) -> Result<(), &'static str> {
+    pub fn protect(
+        &mut self,
+        start: usize,
+        len: usize,
+        new_flags: u32,
+    ) -> Result<(), &'static str> {
         let end = start + len;
         let mut affected = Vec::new();
         for (i, r) in self.vm_map.regions.iter().enumerate() {
@@ -5905,7 +7378,9 @@ impl AddrSpace {
     pub fn split_region(&mut self, addr: usize) -> Result<(), &'static str> {
         let region = self.vm_map.find(addr).ok_or("enomem")?;
         let offset = addr - region.base;
-        if offset == 0 || offset >= region.len { return Err("einval"); }
+        if offset == 0 || offset >= region.len {
+            return Err("einval");
+        }
         let second = VmRegion::new(addr, region.len - offset, region.flags);
         self.vm_map.regions.push(second);
         Ok(())
@@ -6099,12 +7574,24 @@ impl ResourceLimits {
         }
     }
 
-    pub fn check_fd(&self, current: usize) -> bool { current < self.max_fds }
-    pub fn check_threads(&self, current: usize) -> bool { current < self.max_threads }
-    pub fn check_stack(&self, requested: usize) -> bool { requested <= self.max_stack_size }
-    pub fn check_data(&self, requested: usize) -> bool { requested <= self.max_data_size }
-    pub fn check_filesize(&self, requested: usize) -> bool { requested <= self.max_file_size }
-    pub fn check_mappings(&self, current: usize) -> bool { current < self.max_mappings }
+    pub fn check_fd(&self, current: usize) -> bool {
+        current < self.max_fds
+    }
+    pub fn check_threads(&self, current: usize) -> bool {
+        current < self.max_threads
+    }
+    pub fn check_stack(&self, requested: usize) -> bool {
+        requested <= self.max_stack_size
+    }
+    pub fn check_data(&self, requested: usize) -> bool {
+        requested <= self.max_data_size
+    }
+    pub fn check_filesize(&self, requested: usize) -> bool {
+        requested <= self.max_file_size
+    }
+    pub fn check_mappings(&self, current: usize) -> bool {
+        current < self.max_mappings
+    }
 
     pub fn inherit(&self) -> Self {
         Self {
@@ -6120,11 +7607,26 @@ impl ResourceLimits {
 
     pub fn set_limit(&mut self, resource: usize, value: usize) -> Result<(), &'static str> {
         match resource {
-            0 => { self.cpu_time_limit = value; Ok(()) }
-            1 => { self.max_file_size = value; Ok(()) }
-            2 => { self.max_data_size = value; Ok(()) }
-            3 => { self.max_stack_size = value; Ok(()) }
-            7 => { self.max_fds = value; Ok(()) }
+            0 => {
+                self.cpu_time_limit = value;
+                Ok(())
+            }
+            1 => {
+                self.max_file_size = value;
+                Ok(())
+            }
+            2 => {
+                self.max_data_size = value;
+                Ok(())
+            }
+            3 => {
+                self.max_stack_size = value;
+                Ok(())
+            }
+            7 => {
+                self.max_fds = value;
+                Ok(())
+            }
             _ => Err("einval"),
         }
     }
@@ -6142,9 +7644,15 @@ impl ResourceLimits {
 
     pub fn exceeds_any(&self, fds: usize, threads: usize, stack: usize) -> bool {
         let mut violations = 0usize;
-        if fds > self.max_fds { violations += 1; }
-        if threads > self.max_threads { violations += 1; }
-        if stack > self.max_stack_size { violations += 1; }
+        if fds > self.max_fds {
+            violations += 1;
+        }
+        if threads > self.max_threads {
+            violations += 1;
+        }
+        if stack > self.max_stack_size {
+            violations += 1;
+        }
         violations > 0
     }
 }
@@ -6154,10 +7662,18 @@ pub fn bitwise_merge(a: u64, b: u64, mask: u64) -> u64 {
 }
 
 pub fn rotate_bits(value: u64, amount: u32, width: u32) -> u64 {
-    if width == 0 || width > 64 { return value; }
+    if width == 0 || width > 64 {
+        return value;
+    }
     let actual = amount % width;
-    if actual == 0 { return value; }
-    let mask = if width == 64 { !0u64 } else { (1u64 << width) - 1 };
+    if actual == 0 {
+        return value;
+    }
+    let mask = if width == 64 {
+        !0u64
+    } else {
+        (1u64 << width) - 1
+    };
     let v = value & mask;
     ((v << actual) | (v >> (width - actual))) & mask
 }
@@ -6170,30 +7686,55 @@ pub fn popcount64(mut v: u64) -> u32 {
 }
 
 pub fn clz64(v: u64) -> u32 {
-    if v == 0 { return 64; }
+    if v == 0 {
+        return 64;
+    }
     let mut n = 0u32;
     let mut x = v;
-    if x & 0xFFFFFFFF00000000 == 0 { n += 32; x <<= 32; }
-    if x & 0xFFFF000000000000 == 0 { n += 16; x <<= 16; }
-    if x & 0xFF00000000000000 == 0 { n += 8; x <<= 8; }
-    if x & 0xF000000000000000 == 0 { n += 4; x <<= 4; }
-    if x & 0xC000000000000000 == 0 { n += 2; x <<= 2; }
-    if x & 0x8000000000000000 == 0 { n += 1; }
+    if x & 0xFFFFFFFF00000000 == 0 {
+        n += 32;
+        x <<= 32;
+    }
+    if x & 0xFFFF000000000000 == 0 {
+        n += 16;
+        x <<= 16;
+    }
+    if x & 0xFF00000000000000 == 0 {
+        n += 8;
+        x <<= 8;
+    }
+    if x & 0xF000000000000000 == 0 {
+        n += 4;
+        x <<= 4;
+    }
+    if x & 0xC000000000000000 == 0 {
+        n += 2;
+        x <<= 2;
+    }
+    if x & 0x8000000000000000 == 0 {
+        n += 1;
+    }
     n
 }
 
 pub fn ffs64(v: u64) -> Option<u32> {
-    if v == 0 { return None; }
+    if v == 0 {
+        return None;
+    }
     Some(63 - clz64(v & v.wrapping_neg()))
 }
 
 pub fn align_up(addr: usize, align: usize) -> usize {
-    if align == 0 || (align & (align - 1)) != 0 { return addr; }
+    if align == 0 || (align & (align - 1)) != 0 {
+        return addr;
+    }
     (addr + align - 1) & !(align - 1)
 }
 
 pub fn align_down(addr: usize, align: usize) -> usize {
-    if align == 0 || (align & (align - 1)) != 0 { return addr; }
+    if align == 0 || (align & (align - 1)) != 0 {
+        return addr;
+    }
     addr & !(align - 1)
 }
 
@@ -6202,12 +7743,16 @@ pub fn is_power_of_two(v: usize) -> bool {
 }
 
 pub fn log2_floor(v: usize) -> usize {
-    if v == 0 { return 0; }
+    if v == 0 {
+        return 0;
+    }
     (std::mem::size_of::<usize>() * 8) - 1 - (v.leading_zeros() as usize)
 }
 
 pub fn order_for_pages(pages: usize) -> usize {
-    if pages <= 1 { return 0; }
+    if pages <= 1 {
+        return 0;
+    }
     let mut order = 0;
     let mut block = 1;
     while block < pages {
@@ -6218,7 +7763,10 @@ pub fn order_for_pages(pages: usize) -> usize {
 }
 
 pub fn hash_combine(seed: u64, value: u64) -> u64 {
-    seed ^ (value.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(seed << 6).wrapping_add(seed >> 2))
+    seed ^ (value
+        .wrapping_mul(0x9e3779b97f4a7c15)
+        .wrapping_add(seed << 6)
+        .wrapping_add(seed >> 2))
 }
 
 pub fn murmurhash3_finalize(mut h: u64) -> u64 {
@@ -6248,7 +7796,7 @@ pub struct BuddyAllocator {
     pub total_pages: usize,
     pub allocated: AtomicUsize,
     pub addr_order_map: BTreeMap<usize, usize>, // 记录 addr -> order，防止传入错误的 order 信息
-    pub statistics: BuddyStatistics, // 统计信息
+    pub statistics: BuddyStatistics,            // 统计信息
 }
 
 impl BuddyAllocator {
@@ -6315,9 +7863,13 @@ impl BuddyAllocator {
                     }
                     frame += target_pages;
                 }
-                if found.is_some() { break; }
+                if found.is_some() {
+                    break;
+                }
             }
-            if found.is_some() { break; }
+            if found.is_some() {
+                break;
+            }
         }
 
         let (source_order, pos, block, target_addr) = match found {
@@ -6362,13 +7914,17 @@ impl BuddyAllocator {
 
     pub fn alloc_pages(&mut self, pages: usize) -> Option<usize> {
         // 连续
-        if pages == 0 { return None; }
+        if pages == 0 {
+            return None;
+        }
         let order = order_for_pages(pages);
         self.alloc_order(order)
     }
 
     pub fn free(&mut self, addr: usize) {
-        if addr % PAGE_SZ != 0 { return; }
+        if addr % PAGE_SZ != 0 {
+            return;
+        }
 
         let real_order = match self.addr_order_map.remove(&addr) {
             Some(o) => o,
@@ -6389,7 +7945,10 @@ impl BuddyAllocator {
             let block_size = (1usize << current_order) * PAGE_SZ;
             let rel = current_addr - self.base_addr;
             let buddy_addr = self.base_addr + (rel ^ block_size);
-            if let Some(pos) = self.free_lists[current_order].iter().position(|&a| a == buddy_addr) {
+            if let Some(pos) = self.free_lists[current_order]
+                .iter()
+                .position(|&a| a == buddy_addr)
+            {
                 self.free_lists[current_order].remove(pos);
                 current_addr = min(current_addr, buddy_addr);
                 current_order += 1;
@@ -6415,7 +7974,9 @@ impl BuddyAllocator {
         if addr < self.base_addr || addr >= self.base_addr + self.total_pages * PAGE_SZ {
             return false;
         }
-        if addr % PAGE_SZ != 0 { return false; }
+        if addr % PAGE_SZ != 0 {
+            return false;
+        }
         for (order, list) in self.free_lists.iter().enumerate() {
             let block_size = (1usize << order) * PAGE_SZ;
             for &block in list {
@@ -6429,17 +7990,23 @@ impl BuddyAllocator {
 
     pub fn largest_free_order(&self) -> usize {
         for o in (0..=self.max_order).rev() {
-            if !self.free_lists[o].is_empty() { return o; }
+            if !self.free_lists[o].is_empty() {
+                return o;
+            }
         }
         0
     }
 
     pub fn fragmentation_score(&self) -> usize {
         let total_free = self.free_pages_count();
-        if total_free == 0 { return 0; }
+        if total_free == 0 {
+            return 0;
+        }
         let largest = self.largest_free_order();
         let largest_block = 1 << largest;
-        if total_free <= largest_block { return 0; }
+        if total_free <= largest_block {
+            return 0;
+        }
         ((total_free - largest_block) * 100) / total_free
     }
 
@@ -6453,5 +8020,525 @@ impl BuddyAllocator {
             addr_order_map: self.addr_order_map.clone(),
             statistics: self.statistics,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct HeuristicPolicy {
+    pub cache_max_order: usize,
+    pub cache_limit_per_order: usize,
+    pub protect_min_order: usize,
+    pub protect_reserve_blocks: usize,
+}
+
+impl Default for HeuristicPolicy {
+    fn default() -> Self {
+        Self {
+            cache_max_order: 1,
+            cache_limit_per_order: 32,
+            protect_min_order: 4,
+            protect_reserve_blocks: 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct HeuristicStatistics {
+    pub cache_hit_count: usize,
+    pub cache_fill_count: usize,
+    pub cache_flush_count: usize,
+    pub protected_high_order_count: usize,
+    pub fallback_alloc_count: usize,
+    pub cache_bypass_count: usize,
+    pub pressure_enter_count: usize,
+    pub pressure_exit_count: usize,
+}
+
+pub struct HeuristicAllocator {
+    pub free_lists: Vec<Vec<usize>>,
+    pub max_order: usize,
+    pub base_addr: usize,
+    pub total_pages: usize,
+    pub allocated: AtomicUsize,
+    pub addr_order_map: BTreeMap<usize, usize>,
+    pub statistics: BuddyStatistics,
+    pub policy: HeuristicPolicy,
+    pub heuristic_statistics: HeuristicStatistics,
+    pub small_caches: Vec<Vec<usize>>,
+    pub merge_pressure: bool,
+}
+
+impl HeuristicAllocator {
+    pub fn new(base: usize, total_pages: usize, max_order: usize) -> Self {
+        Self::with_policy(base, total_pages, max_order, HeuristicPolicy::default())
+    }
+
+    pub fn with_policy(
+        base: usize,
+        total_pages: usize,
+        max_order: usize,
+        policy: HeuristicPolicy,
+    ) -> Self {
+        let mut free_lists = Vec::with_capacity(max_order + 1);
+        for _ in 0..=max_order {
+            free_lists.push(Vec::new());
+        }
+        let order = log2_floor(total_pages);
+        let usable_order = min(order, max_order);
+        let block_pages = 1 << usable_order;
+        let mut addr = base;
+        let mut remaining = total_pages;
+        while remaining >= block_pages {
+            free_lists[usable_order].push(addr);
+            addr += block_pages * PAGE_SZ;
+            remaining -= block_pages;
+        }
+        for o in (0..usable_order).rev() {
+            let pages = 1 << o;
+            while remaining >= pages {
+                free_lists[o].push(addr);
+                addr += pages * PAGE_SZ;
+                remaining -= pages;
+            }
+        }
+        let cache_orders = min(policy.cache_max_order, max_order) + 1;
+        let mut small_caches = Vec::with_capacity(cache_orders);
+        for _ in 0..cache_orders {
+            small_caches.push(Vec::new());
+        }
+        Self {
+            free_lists,
+            max_order,
+            base_addr: base,
+            total_pages,
+            allocated: AtomicUsize::new(0),
+            addr_order_map: BTreeMap::new(),
+            statistics: BuddyStatistics::default(),
+            policy,
+            heuristic_statistics: HeuristicStatistics::default(),
+            small_caches,
+            merge_pressure: false,
+        }
+    }
+
+    pub fn alloc_order(&mut self, order: usize) -> Option<usize> {
+        self.alloc_order_aligned(order, 1)
+    }
+
+    pub fn alloc_order_aligned(&mut self, order: usize, align: usize) -> Option<usize> {
+        if order > self.max_order {
+            self.statistics.failed_alloc_count += 1;
+            return None;
+        }
+
+        let align_pages = if align < 1 { 1 } else { align };
+
+        if let Some(addr) = self.pop_cache(order, align_pages) {
+            return Some(addr);
+        }
+
+        let mut flushed_cache = false;
+        if order >= self.policy.protect_min_order && self.cached_pages_count() > 0 {
+            self.heuristic_statistics.protected_high_order_count += 1;
+            self.flush_all_caches();
+            flushed_cache = true;
+        }
+
+        let target_pages = 1usize << order;
+
+        loop {
+            let mut found = None;
+
+            for o in order..=self.max_order {
+                let block_pages = 1usize << o;
+                for (pos, &block) in self.free_lists[o].iter().enumerate() {
+                    let start_frame = (block - self.base_addr) / PAGE_SZ;
+                    let end_frame = start_frame + block_pages;
+                    let mut frame = start_frame;
+                    while frame + target_pages <= end_frame {
+                        if frame % align_pages == 0 {
+                            let target_addr = self.base_addr + frame * PAGE_SZ;
+                            found = Some((o, pos, block, target_addr));
+                            break;
+                        }
+                        frame += target_pages;
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+
+            let (source_order, pos, block, target_addr) = match found {
+                Some(v) => v,
+                None if !flushed_cache && self.cached_pages_count() > 0 => {
+                    self.flush_all_caches();
+                    flushed_cache = true;
+                    continue;
+                }
+                None => {
+                    self.statistics.failed_alloc_count += 1;
+                    if order >= self.policy.protect_min_order {
+                        self.enter_merge_pressure();
+                    }
+                    return None;
+                }
+            };
+
+            self.free_lists[source_order].remove(pos);
+
+            let mut current_order = source_order;
+            let mut addr = block;
+            while current_order > order {
+                current_order -= 1;
+                let half_size = (1usize << current_order) * PAGE_SZ;
+                let right = addr + half_size;
+                if target_addr < right {
+                    self.free_lists[current_order].push(right);
+                } else {
+                    self.free_lists[current_order].push(addr);
+                    addr = right;
+                }
+                self.statistics.split_count += 1;
+            }
+
+            self.allocated.fetch_add(1 << order, Ordering::Relaxed);
+            self.statistics.alloc_count += 1;
+            self.heuristic_statistics.fallback_alloc_count += 1;
+            if source_order == order {
+                self.statistics.exact_hit_count += 1;
+            }
+            self.addr_order_map.insert(addr, order);
+            return Some(addr);
+        }
+    }
+
+    pub fn alloc_page(&mut self) -> Option<usize> {
+        self.alloc_order(0)
+    }
+
+    pub fn alloc_pages(&mut self, pages: usize) -> Option<usize> {
+        if pages == 0 {
+            return None;
+        }
+        let order = order_for_pages(pages);
+        self.alloc_order(order)
+    }
+
+    pub fn free(&mut self, addr: usize) {
+        if addr % PAGE_SZ != 0 {
+            return;
+        }
+
+        let real_order = match self.addr_order_map.remove(&addr) {
+            Some(o) => o,
+            None => return,
+        };
+
+        let end = self.base_addr + self.total_pages * PAGE_SZ;
+        let block_bytes = (1usize << real_order) * PAGE_SZ;
+        let block_end = addr + block_bytes;
+        if addr < self.base_addr || block_end > end || (addr - self.base_addr) % block_bytes != 0 {
+            self.addr_order_map.insert(addr, real_order);
+            return;
+        }
+
+        // free to cache
+        let bypass_cache = self.should_bypass_cache(addr, real_order);
+        if self.cacheable_order(real_order) && !bypass_cache {
+            if self.push_cache(addr, real_order) {
+                return;
+            }
+            // cache is full
+            self.flush_cache_order(real_order);
+            if self.push_cache(addr, real_order) {
+                return;
+            }
+        }
+
+        // free to freelist
+        if self.free_to_buddy(addr, real_order, true) {
+            if bypass_cache {
+                self.heuristic_statistics.cache_bypass_count += 1;
+            }
+            self.leave_merge_pressure();
+        } else {
+            self.addr_order_map.insert(addr, real_order);
+        }
+    }
+
+    pub fn free_pages_count(&self) -> usize {
+        let mut count = 0;
+        for (order, list) in self.free_lists.iter().enumerate() {
+            count += list.len() * (1 << order);
+        }
+        count + self.cached_pages_count()
+    }
+
+    pub fn is_free_addr(&self, addr: usize) -> bool {
+        if addr < self.base_addr || addr >= self.base_addr + self.total_pages * PAGE_SZ {
+            return false;
+        }
+        if addr % PAGE_SZ != 0 {
+            return false;
+        }
+        for (order, list) in self.free_lists.iter().enumerate() {
+            let block_size = (1usize << order) * PAGE_SZ;
+            for &block in list {
+                if addr >= block && addr < block + block_size {
+                    return true;
+                }
+            }
+        }
+        // check cache
+        for (order, cache) in self.small_caches.iter().enumerate() {
+            let block_size = (1usize << order) * PAGE_SZ;
+            for &block in cache {
+                if addr >= block && addr < block + block_size {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn largest_free_order(&self) -> usize {
+        for o in (0..=self.max_order).rev() {
+            if !self.free_lists[o].is_empty() {
+                return o;
+            }
+            // check cache
+            if o < self.small_caches.len() && !self.small_caches[o].is_empty() {
+                return o;
+            }
+        }
+        0
+    }
+
+    pub fn fragmentation_score(&self) -> usize {
+        let total_free = self.free_pages_count();
+        if total_free == 0 {
+            return 0;
+        }
+        let largest = self.largest_free_order();
+        let largest_block = 1 << largest;
+        if total_free <= largest_block {
+            return 0;
+        }
+        ((total_free - largest_block) * 100) / total_free
+    }
+
+    pub fn allocator_statistics(&self) -> BuddyStatistics {
+        self.statistics
+    }
+
+    pub fn heuristic_statistics(&self) -> HeuristicStatistics {
+        self.heuristic_statistics
+    }
+
+    pub fn snapshot(&self) -> HeuristicAllocator {
+        HeuristicAllocator {
+            free_lists: self.free_lists.clone(),
+            max_order: self.max_order,
+            base_addr: self.base_addr,
+            total_pages: self.total_pages,
+            allocated: AtomicUsize::new(self.allocated.load(Ordering::Relaxed)),
+            addr_order_map: self.addr_order_map.clone(),
+            statistics: self.statistics,
+            policy: self.policy,
+            heuristic_statistics: self.heuristic_statistics,
+            small_caches: self.small_caches.clone(),
+            merge_pressure: self.merge_pressure,
+        }
+    }
+
+    fn cacheable_order(&self, order: usize) -> bool {
+        // 是否可以进缓存
+        self.policy.cache_limit_per_order > 0 && order < self.small_caches.len()
+    }
+
+    fn cached_pages_count(&self) -> usize {
+        // 统计 cache 中的页数
+        let mut count = 0;
+        for (order, cache) in self.small_caches.iter().enumerate() {
+            count += cache.len() * (1 << order);
+        }
+        count
+    }
+
+    fn push_cache(&mut self, addr: usize, order: usize) -> bool {
+        if !self.cacheable_order(order) {
+            return false;
+        }
+
+        if self.small_caches[order].len() >= self.policy.cache_limit_per_order {
+            return false;
+        }
+
+        self.small_caches[order].push(addr);
+        self.allocated.fetch_sub(1 << order, Ordering::Relaxed);
+        self.statistics.free_count += 1;
+        self.heuristic_statistics.cache_fill_count += 1;
+        true
+    }
+
+    fn pop_cache(&mut self, order: usize, align_pages: usize) -> Option<usize> {
+        // 取一个满足 order + align 的块
+        if !self.cacheable_order(order) {
+            return None;
+        }
+
+        let pos = self.small_caches[order].iter().position(|&addr| {
+            let frame = (addr - self.base_addr) / PAGE_SZ;
+            frame % align_pages == 0
+        })?;
+
+        let addr = self.small_caches[order].remove(pos);
+        self.addr_order_map.insert(addr, order);
+        self.allocated.fetch_add(1 << order, Ordering::Relaxed);
+        self.statistics.alloc_count += 1;
+        self.statistics.exact_hit_count += 1;
+        self.heuristic_statistics.cache_hit_count += 1;
+        Some(addr)
+    }
+
+    fn free_to_buddy(&mut self, addr: usize, real_order: usize, count_as_free: bool) -> bool {
+        // count_as_free == true: 普通 free，需要 allocated -= pages, free_count += 1
+        // count_as_free == false: cache flush，不再改 allocated/free_count
+
+        if addr % PAGE_SZ != 0 {
+            return false;
+        }
+
+        let end = self.base_addr + self.total_pages * PAGE_SZ;
+        let block_bytes = (1usize << real_order) * PAGE_SZ;
+        let block_end = addr + block_bytes;
+
+        if addr < self.base_addr || block_end > end || (addr - self.base_addr) % block_bytes != 0 {
+            return false;
+        }
+
+        let mut current_addr = addr;
+        let mut current_order = real_order;
+
+        while current_order < self.max_order {
+            let block_size = (1usize << current_order) * PAGE_SZ;
+            let rel = current_addr - self.base_addr;
+            let buddy_addr = self.base_addr + (rel ^ block_size);
+
+            if let Some(pos) = self.free_lists[current_order]
+                .iter()
+                .position(|&a| a == buddy_addr)
+            {
+                self.free_lists[current_order].remove(pos);
+                current_addr = min(current_addr, buddy_addr);
+                current_order += 1;
+                self.statistics.merge_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        self.free_lists[current_order].push(current_addr);
+
+        if count_as_free {
+            self.allocated.fetch_sub(1 << real_order, Ordering::Relaxed);
+            self.statistics.free_count += 1;
+        }
+
+        true
+    }
+
+    fn flush_cache_order(&mut self, order: usize) {
+        // cache[order] 全部放回 free list
+        if order >= self.small_caches.len() {
+            return;
+        }
+
+        let cached = std::mem::take(&mut self.small_caches[order]);
+        self.heuristic_statistics.cache_flush_count += cached.len();
+
+        for addr in cached {
+            self.free_to_buddy(addr, order, false);
+        }
+    }
+
+    fn flush_all_caches(&mut self) {
+        for order in 0..self.small_caches.len() {
+            self.flush_cache_order(order);
+        }
+        self.leave_merge_pressure();
+    }
+
+    fn has_free_buddy_in_buddy(&self, addr: usize, order: usize) -> bool {
+        if order >= self.max_order {
+            return false;
+        }
+
+        let block_size = (1usize << order) * PAGE_SZ;
+        let rel = addr - self.base_addr;
+        let buddy_addr = self.base_addr + (rel ^ block_size);
+
+        self.free_lists[order].iter().any(|&a| a == buddy_addr)
+    }
+
+    fn target_blocks_at_order(&self, order: usize) -> usize {
+        if order < self.policy.protect_min_order {
+            0
+        } else {
+            self.policy.protect_reserve_blocks
+        }
+    }
+
+    fn effective_free_blocks_at_order(&self, order: usize) -> usize {
+        let mut count = 0;
+
+        // 高阶块可拆的情况下也算进去
+        for source_order in order..=self.max_order {
+            count += self.free_lists[source_order].len() * (1usize << (source_order - order));
+        }
+
+        if order < self.small_caches.len() {
+            count += self.small_caches[order].len();
+        }
+
+        count
+    }
+
+    fn high_order_under_target(&self) -> bool {
+        if self.policy.protect_reserve_blocks == 0 {
+            return false;
+        }
+
+        for order in self.policy.protect_min_order..=self.max_order {
+            if self.effective_free_blocks_at_order(order) < self.target_blocks_at_order(order) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn enter_merge_pressure(&mut self) {
+        if !self.merge_pressure {
+            self.heuristic_statistics.pressure_enter_count += 1;
+        }
+        self.merge_pressure = true;
+    }
+
+    fn leave_merge_pressure(&mut self) {
+        if self.merge_pressure && !self.high_order_under_target() {
+            self.merge_pressure = false;
+            self.heuristic_statistics.pressure_exit_count += 1;
+        }
+    }
+
+    fn should_bypass_cache(&self, addr: usize, order: usize) -> bool {
+        self.merge_pressure
+            && self.has_free_buddy_in_buddy(addr, order)
+            && self.high_order_under_target()
     }
 }

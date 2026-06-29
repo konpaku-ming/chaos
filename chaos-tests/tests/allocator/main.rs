@@ -367,6 +367,90 @@ fn buddy_snapshot_is_independent_copy() {
 }
 
 #[test]
+fn heuristic_allocator_standalone_interface_matches_buddy_baseline() {
+    let mut alloc = HeuristicAllocator::new(BASE, 8, 3);
+
+    assert_eq!(alloc.free_pages_count(), 8);
+    assert_eq!(alloc.largest_free_order(), 3);
+    assert_eq!(alloc.fragmentation_score(), 0);
+
+    let first = alloc.alloc_page();
+    let second = alloc.alloc_order_aligned(1, 4);
+
+    assert_eq!(first, Some(BASE));
+    assert_eq!(second, Some(BASE + pages(4)));
+    assert_eq!(alloc.free_pages_count(), 5);
+    assert!(!alloc.is_free_addr(BASE));
+    assert!(alloc.is_free_addr(BASE + pages(2)));
+    assert!(!alloc.is_free_addr(BASE + pages(4)));
+    assert_eq!(alloc.addr_order_map.get(&BASE), Some(&0));
+    assert_eq!(alloc.addr_order_map.get(&(BASE + pages(4))), Some(&1));
+    assert_eq!(alloc.statistics.alloc_count, 2);
+    assert_eq!(alloc.statistics.split_count, 4);
+    assert_eq!(alloc.heuristic_statistics().fallback_alloc_count, 2);
+
+    let snapshot = alloc.snapshot();
+    alloc.free(first.unwrap());
+    alloc.free(second.unwrap());
+
+    assert_eq!(snapshot.free_pages_count(), 5);
+    assert_eq!(snapshot.statistics.alloc_count, 2);
+    assert_eq!(alloc.free_pages_count(), 8);
+    assert_eq!(alloc.statistics.free_count, 2);
+}
+
+#[test]
+fn heuristic_small_page_churn_keeps_cache_split_savings() {
+    let mut buddy = BuddyAllocator::new(BASE, 1024, 10);
+    for _ in 0..64 {
+        let addr = buddy.alloc_page().unwrap();
+        buddy.free(addr);
+    }
+
+    let mut alloc = HeuristicAllocator::new(BASE, 1024, 10);
+    for _ in 0..64 {
+        let addr = alloc.alloc_page().unwrap();
+        alloc.free(addr);
+    }
+
+    let heuristic = alloc.heuristic_statistics();
+    assert_eq!(alloc.free_pages_count(), 1024);
+    assert_eq!(alloc.statistics.failed_alloc_count, 0);
+    assert!(heuristic.cache_hit_count > 0);
+    assert!(alloc.statistics.split_count < buddy.statistics.split_count);
+}
+
+#[test]
+fn heuristic_large_pressure_bypasses_cache_to_restore_high_order_blocks() {
+    let mut alloc = HeuristicAllocator::new(BASE, 64, 6);
+    let mut live = Vec::new();
+
+    for _ in 0..64 {
+        live.push(alloc.alloc_page().unwrap());
+    }
+    for i in (0..64).step_by(2) {
+        alloc.free(live[i]);
+    }
+
+    assert_eq!(alloc.alloc_order(5), None);
+    assert!(alloc.merge_pressure);
+
+    for i in (1..64).step_by(2) {
+        alloc.free(live[i]);
+    }
+
+    let heuristic = alloc.heuristic_statistics();
+    assert_eq!(alloc.free_pages_count(), 64);
+    assert_eq!(alloc.largest_free_order(), 6);
+    assert_eq!(alloc.fragmentation_score(), 0);
+    assert_eq!(alloc.statistics.failed_alloc_count, 1);
+    assert!(heuristic.cache_bypass_count > 0);
+    assert_eq!(heuristic.pressure_enter_count, 1);
+    assert_eq!(heuristic.pressure_exit_count, 1);
+    assert!(!alloc.merge_pressure);
+}
+
+#[test]
 fn benchmark_workload_small_page_churn_baseline() {
     let mut steps = Vec::new();
     for _ in 0..64 {
@@ -632,11 +716,16 @@ fn frame_alloc_helpers_return_addresses_and_deallocate() {
     frame_dealloc(&pool, addr.unwrap());
     assert_eq!(pool.free_count(), 4);
 
-    let contig = frame_alloc_contig(&pool, 2, 0);
-    assert_eq!(contig, Some(MEM_OFF));
+    let contig = frame_alloc_contig(&pool, 2, 0).unwrap();
+    assert!(contig >= MEM_OFF);
+    assert!(contig + pages(2) <= MEM_OFF + pages(4));
+    assert_eq!((contig - MEM_OFF) % PAGE_SZ, 0);
     assert_eq!(pool.free_count(), 2);
+    let start_frame = (contig - MEM_OFF) / PAGE_SZ;
+    assert!(!pool.avail(start_frame));
+    assert!(!pool.avail(start_frame + 1));
 
-    frame_dealloc(&pool, contig.unwrap());
+    frame_dealloc(&pool, contig);
     assert_eq!(pool.free_count(), 4);
 }
 
