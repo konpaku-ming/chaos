@@ -984,7 +984,7 @@ impl FramePool {
     pub fn get_inner(&self) -> Option<usize> {
         // 单页 allocate
         let mut allocator = self.allocator.lock().unwrap();
-        let addr = allocator.alloc_order(0)?;
+        let addr = allocator.alloc_page()?;
         let frame_id = (addr - MEM_OFF) / PAGE_SZ;
         Some(frame_id)
     }
@@ -994,20 +994,15 @@ impl FramePool {
         let order = order_for_pages(sz);
         let align = if align_log2 < 1 { 1 } else { 1usize << align_log2 };
         let mut allocator = self.allocator.lock().unwrap();
-        let addr = allocator.alloc_order(order)?;
+        let addr = allocator.alloc_order_aligned(order, align)?;
         let idx = (addr - MEM_OFF) / PAGE_SZ;
-        if idx % align == 0 {
-            Some(idx)
-        } else {
-            allocator.free_order(addr);
-            None
-        }
+        Some(idx)
     }
     pub fn put(&self, idx: usize) {
-        // free idx frame
+        // 释放 idx frame
         let mut allocator = self.allocator.lock().unwrap();
         if idx < self.cap {
-            allocator.free_order(MEM_OFF + idx * PAGE_SZ);
+            allocator.free(MEM_OFF + idx * PAGE_SZ);
         }
     }
     pub fn avail(&self, idx: usize) -> bool {
@@ -1025,19 +1020,19 @@ impl FramePool {
         // 在 zone 中单页 allocate
         if !zone.zone_can_alloc() { return None; }
         let mut allocator = self.allocator.lock().unwrap();
-        let addr = allocator.alloc_order(0)?;
+        let addr = allocator.alloc_page()?;
         let idx = (addr - MEM_OFF) / PAGE_SZ;
         if zone.contains_pfn(idx) {
             zone.free_count.fetch_sub(1, Ordering::Relaxed);
             Some(idx)
         } else {
-            allocator.free_order(addr);
+            allocator.free(addr);
             None
         }
     }
 
     pub fn put_zone_aware(&self, idx: usize, zone: &ZoneInfo) {
-        // free idx frame (in zone)
+        // 释放 idx frame (in zone)
         if idx < self.cap && zone.contains_pfn(idx) {
             self.put(idx);
             zone.free_count.fetch_add(1, Ordering::Relaxed);
@@ -6292,35 +6287,87 @@ impl BuddyAllocator {
     }
 
     pub fn alloc_order(&mut self, order: usize) -> Option<usize> {
-        if order > self.max_order { 
+        self.alloc_order_aligned(order, 1)
+    }
+
+    pub fn alloc_order_aligned(&mut self, order: usize, align: usize) -> Option<usize> {
+        if order > self.max_order {
             self.statistics.failed_alloc_count += 1;
             return None;
         }
+
+        let align_pages = if align < 1 { 1 } else { align };
+        let target_pages = 1usize << order;
+        let mut found = None;
+
+        // allocate
         for o in order..=self.max_order {
-            if let Some(block) = self.free_lists[o].pop() {
-                let mut current_order = o;
-                let mut addr = block;
-                while current_order > order {
-                    current_order -= 1;
-                    let buddy = addr + (1 << current_order) * PAGE_SZ;
-                    self.free_lists[current_order].push(buddy);
-                    self.statistics.split_count += 1; // 记一次 split
+            let block_pages = 1usize << o;
+            for (pos, &block) in self.free_lists[o].iter().enumerate() {
+                let start_frame = (block - self.base_addr) / PAGE_SZ;
+                let end_frame = start_frame + block_pages;
+                let mut frame = start_frame;
+                while frame + target_pages <= end_frame {
+                    if frame % align_pages == 0 {
+                        let target_addr = self.base_addr + frame * PAGE_SZ;
+                        found = Some((o, pos, block, target_addr));
+                        break;
+                    }
+                    frame += target_pages;
                 }
-                self.allocated.fetch_add(1 << order, Ordering::Relaxed);
-                // 维护统计信息
-                self.statistics.alloc_count += 1;
-                if o == order {
-                    self.statistics.exact_hit_count += 1;
-                }
-                self.addr_order_map.insert(addr, order);
-                return Some(addr);
+                if found.is_some() { break; }
             }
+            if found.is_some() { break; }
         }
-        self.statistics.failed_alloc_count += 1;
-        return None
+
+        let (source_order, pos, block, target_addr) = match found {
+            Some(v) => v,
+            None => {
+                self.statistics.failed_alloc_count += 1;
+                return None;
+            }
+        };
+
+        self.free_lists[source_order].remove(pos);
+
+        // split
+        let mut current_order = source_order;
+        let mut addr = block;
+        while current_order > order {
+            current_order -= 1;
+            let half_size = (1usize << current_order) * PAGE_SZ;
+            let right = addr + half_size;
+            if target_addr < right {
+                self.free_lists[current_order].push(right);
+            } else {
+                self.free_lists[current_order].push(addr);
+                addr = right;
+            }
+            self.statistics.split_count += 1;
+        }
+
+        self.allocated.fetch_add(1 << order, Ordering::Relaxed);
+        self.statistics.alloc_count += 1;
+        if source_order == order {
+            self.statistics.exact_hit_count += 1;
+        }
+        self.addr_order_map.insert(addr, order);
+        Some(addr)
     }
 
-    pub fn free_order(&mut self, addr: usize) {
+    pub fn alloc_page(&mut self) -> Option<usize> {
+        // 单页
+        self.alloc_order(0)
+    }
+
+    pub fn alloc_pages(&mut self, pages: usize) -> Option<usize> {
+        // 连续
+        if pages == 0 { return None; }
+        let order = order_for_pages(pages);
+        self.alloc_order(order)
+    }
+
+    pub fn free(&mut self, addr: usize) {
         if addr % PAGE_SZ != 0 { return; }
 
         let real_order = match self.addr_order_map.remove(&addr) {
