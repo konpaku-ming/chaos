@@ -1365,12 +1365,14 @@ impl FramePool {
 
     pub fn batch_alloc(&self, count: usize) -> Vec<usize> {
         // allocate 多个页帧，不要求连续
+        let mut allocator = self.allocator.lock().unwrap();
         let mut result = Vec::with_capacity(count);
         for _ in 0..count {
-            match self.get_inner() {
-                Some(idx) => result.push(idx),
+            let addr = match allocator.alloc_page() {
+                Some(addr) => addr,
                 None => break,
-            }
+            };
+            result.push((addr - MEM_OFF) / PAGE_SZ);
         }
         result
     }
@@ -8025,33 +8027,51 @@ impl BuddyAllocator {
 
 #[derive(Clone, Copy)]
 pub struct HeuristicPolicy {
-    pub cache_max_order: usize,
-    pub cache_limit_per_order: usize,
+    pub order0_base_target: usize,
+    pub order1_base_target: usize,
+    pub order2_base_target: usize,
+    pub order3_base_target: usize,
+    pub order0_max_target: usize,
+    pub order1_max_target: usize,
+    pub order2_max_target: usize,
+    pub order3_max_target: usize,
+    pub high_order_target: usize,
     pub protect_min_order: usize,
-    pub protect_reserve_blocks: usize,
+    pub feedback_window_ops: usize,
+    pub feedback_pool_fraction: usize,
+    pub pressure_decay_divisor: usize,
 }
 
 impl Default for HeuristicPolicy {
     fn default() -> Self {
         Self {
-            cache_max_order: 1,
-            cache_limit_per_order: 32,
+            order0_base_target: 4,
+            order1_base_target: 2,
+            order2_base_target: 1,
+            order3_base_target: 1,
+            order0_max_target: 32,
+            order1_max_target: 16,
+            order2_max_target: 8,
+            order3_max_target: 4,
+            high_order_target: 1,
             protect_min_order: 4,
-            protect_reserve_blocks: 1,
+            feedback_window_ops: 128,
+            feedback_pool_fraction: 16,
+            pressure_decay_divisor: 2,
         }
     }
 }
 
 #[derive(Clone, Copy, Default)]
 pub struct HeuristicStatistics {
-    pub cache_hit_count: usize,
-    pub cache_fill_count: usize,
-    pub cache_flush_count: usize,
-    pub protected_high_order_count: usize,
-    pub fallback_alloc_count: usize,
-    pub cache_bypass_count: usize,
+    pub free_list_alloc_count: usize,
+    pub preserve_count: usize,
+    pub active_coalesce_count: usize,
+    pub active_coalesce_pass_count: usize,
     pub pressure_enter_count: usize,
     pub pressure_exit_count: usize,
+    pub feedback_update_count: usize,
+    pub pressure_decay_count: usize,
 }
 
 pub struct HeuristicAllocator {
@@ -8064,11 +8084,19 @@ pub struct HeuristicAllocator {
     pub statistics: BuddyStatistics,
     pub policy: HeuristicPolicy,
     pub heuristic_statistics: HeuristicStatistics,
-    pub small_caches: Vec<Vec<usize>>,
+    pub dynamic_targets: [usize; 4],
+    pub recent_allocs: [usize; 4],
+    pub feedback_ops: usize,
     pub merge_pressure: bool,
 }
 
 impl HeuristicAllocator {
+    const SPLIT_COST_PER_ORDER: isize = 100;
+    const REFILL_BONUS_PER_ORDER: isize = 35;
+    const RESERVE_DEFICIT_PENALTY: isize = 30;
+    const MERGEABLE_EXACT_PENALTY: isize = 40;
+    const ISOLATED_EXACT_BONUS: isize = -20;
+
     pub fn new(base: usize, total_pages: usize, max_order: usize) -> Self {
         Self::with_policy(base, total_pages, max_order, HeuristicPolicy::default())
     }
@@ -8101,11 +8129,11 @@ impl HeuristicAllocator {
                 remaining -= pages;
             }
         }
-        let cache_orders = min(policy.cache_max_order, max_order) + 1;
-        let mut small_caches = Vec::with_capacity(cache_orders);
-        for _ in 0..cache_orders {
-            small_caches.push(Vec::new());
-        }
+        let dynamic_targets = Self::scaled_targets_for_pool(
+            total_pages,
+            policy.feedback_pool_fraction,
+            Self::policy_base_targets(&policy),
+        );
         Self {
             free_lists,
             max_order,
@@ -8116,7 +8144,9 @@ impl HeuristicAllocator {
             statistics: BuddyStatistics::default(),
             policy,
             heuristic_statistics: HeuristicStatistics::default(),
-            small_caches,
+            dynamic_targets,
+            recent_allocs: [0; 4],
+            feedback_ops: 0,
             merge_pressure: false,
         }
     }
@@ -8126,6 +8156,8 @@ impl HeuristicAllocator {
     }
 
     pub fn alloc_order_aligned(&mut self, order: usize, align: usize) -> Option<usize> {
+        self.record_alloc_request(order);
+
         if order > self.max_order {
             self.statistics.failed_alloc_count += 1;
             return None;
@@ -8133,21 +8165,15 @@ impl HeuristicAllocator {
 
         let align_pages = if align < 1 { 1 } else { align };
 
-        if let Some(addr) = self.pop_cache(order, align_pages) {
-            return Some(addr);
-        }
-
-        let mut flushed_cache = false;
-        if order >= self.policy.protect_min_order && self.cached_pages_count() > 0 {
-            self.heuristic_statistics.protected_high_order_count += 1;
-            self.flush_all_caches();
-            flushed_cache = true;
-        }
-
         let target_pages = 1usize << order;
 
         loop {
+            if let Some(addr) = self.try_fast_exact_alloc(order, align_pages) {
+                return Some(addr);
+            }
+
             let mut found = None;
+            let mut best_score = isize::MAX;
 
             for o in order..=self.max_order {
                 let block_pages = 1usize << o;
@@ -8158,61 +8184,40 @@ impl HeuristicAllocator {
                     while frame + target_pages <= end_frame {
                         if frame % align_pages == 0 {
                             let target_addr = self.base_addr + frame * PAGE_SZ;
-                            found = Some((o, pos, block, target_addr));
+                            let score = self.alloc_candidate_score(order, o, block, target_addr);
+                            if score < best_score {
+                                best_score = score;
+                                found = Some((o, pos, block, target_addr));
+                            }
                             break;
                         }
                         frame += target_pages;
                     }
-                    if found.is_some() {
+                }
+
+                if found.is_some() && o < self.max_order {
+                    let next_order = o + 1;
+                    if best_score <= self.min_possible_alloc_score(order, next_order) {
                         break;
                     }
-                }
-                if found.is_some() {
-                    break;
                 }
             }
 
             let (source_order, pos, block, target_addr) = match found {
                 Some(v) => v,
-                None if !flushed_cache && self.cached_pages_count() > 0 => {
-                    self.flush_all_caches();
-                    flushed_cache = true;
-                    continue;
-                }
                 None => {
-                    self.statistics.failed_alloc_count += 1;
                     if order >= self.policy.protect_min_order {
                         self.enter_merge_pressure();
+                        if self.coalesce_free_lists_for_pressure() {
+                            continue;
+                        }
                     }
+                    self.statistics.failed_alloc_count += 1;
                     return None;
                 }
             };
 
-            self.free_lists[source_order].remove(pos);
-
-            let mut current_order = source_order;
-            let mut addr = block;
-            while current_order > order {
-                current_order -= 1;
-                let half_size = (1usize << current_order) * PAGE_SZ;
-                let right = addr + half_size;
-                if target_addr < right {
-                    self.free_lists[current_order].push(right);
-                } else {
-                    self.free_lists[current_order].push(addr);
-                    addr = right;
-                }
-                self.statistics.split_count += 1;
-            }
-
-            self.allocated.fetch_add(1 << order, Ordering::Relaxed);
-            self.statistics.alloc_count += 1;
-            self.heuristic_statistics.fallback_alloc_count += 1;
-            if source_order == order {
-                self.statistics.exact_hit_count += 1;
-            }
-            self.addr_order_map.insert(addr, order);
-            return Some(addr);
+            return Some(self.alloc_from_free_list(order, source_order, pos, block, target_addr));
         }
     }
 
@@ -8246,24 +8251,7 @@ impl HeuristicAllocator {
             return;
         }
 
-        // free to cache
-        let bypass_cache = self.should_bypass_cache(addr, real_order);
-        if self.cacheable_order(real_order) && !bypass_cache {
-            if self.push_cache(addr, real_order) {
-                return;
-            }
-            // cache is full
-            self.flush_cache_order(real_order);
-            if self.push_cache(addr, real_order) {
-                return;
-            }
-        }
-
-        // free to freelist
         if self.free_to_buddy(addr, real_order, true) {
-            if bypass_cache {
-                self.heuristic_statistics.cache_bypass_count += 1;
-            }
             self.leave_merge_pressure();
         } else {
             self.addr_order_map.insert(addr, real_order);
@@ -8275,7 +8263,7 @@ impl HeuristicAllocator {
         for (order, list) in self.free_lists.iter().enumerate() {
             count += list.len() * (1 << order);
         }
-        count + self.cached_pages_count()
+        count
     }
 
     pub fn is_free_addr(&self, addr: usize) -> bool {
@@ -8293,25 +8281,12 @@ impl HeuristicAllocator {
                 }
             }
         }
-        // check cache
-        for (order, cache) in self.small_caches.iter().enumerate() {
-            let block_size = (1usize << order) * PAGE_SZ;
-            for &block in cache {
-                if addr >= block && addr < block + block_size {
-                    return true;
-                }
-            }
-        }
         false
     }
 
     pub fn largest_free_order(&self) -> usize {
         for o in (0..=self.max_order).rev() {
             if !self.free_lists[o].is_empty() {
-                return o;
-            }
-            // check cache
-            if o < self.small_caches.len() && !self.small_caches[o].is_empty() {
                 return o;
             }
         }
@@ -8350,66 +8325,18 @@ impl HeuristicAllocator {
             statistics: self.statistics,
             policy: self.policy,
             heuristic_statistics: self.heuristic_statistics,
-            small_caches: self.small_caches.clone(),
+            dynamic_targets: self.dynamic_targets,
+            recent_allocs: self.recent_allocs,
+            feedback_ops: self.feedback_ops,
             merge_pressure: self.merge_pressure,
         }
     }
 
-    fn cacheable_order(&self, order: usize) -> bool {
-        // 是否可以进缓存
-        self.policy.cache_limit_per_order > 0 && order < self.small_caches.len()
-    }
-
-    fn cached_pages_count(&self) -> usize {
-        // 统计 cache 中的页数
-        let mut count = 0;
-        for (order, cache) in self.small_caches.iter().enumerate() {
-            count += cache.len() * (1 << order);
-        }
-        count
-    }
-
-    fn push_cache(&mut self, addr: usize, order: usize) -> bool {
-        if !self.cacheable_order(order) {
-            return false;
-        }
-
-        if self.small_caches[order].len() >= self.policy.cache_limit_per_order {
-            return false;
-        }
-
-        self.small_caches[order].push(addr);
-        self.allocated.fetch_sub(1 << order, Ordering::Relaxed);
-        self.statistics.free_count += 1;
-        self.heuristic_statistics.cache_fill_count += 1;
-        true
-    }
-
-    fn pop_cache(&mut self, order: usize, align_pages: usize) -> Option<usize> {
-        // 取一个满足 order + align 的块
-        if !self.cacheable_order(order) {
-            return None;
-        }
-
-        let pos = self.small_caches[order].iter().position(|&addr| {
-            let frame = (addr - self.base_addr) / PAGE_SZ;
-            frame % align_pages == 0
-        })?;
-
-        let addr = self.small_caches[order].remove(pos);
-        self.addr_order_map.insert(addr, order);
-        self.allocated.fetch_add(1 << order, Ordering::Relaxed);
-        self.statistics.alloc_count += 1;
-        self.statistics.exact_hit_count += 1;
-        self.heuristic_statistics.cache_hit_count += 1;
-        Some(addr)
-    }
-
     fn free_to_buddy(&mut self, addr: usize, real_order: usize, count_as_free: bool) -> bool {
         // count_as_free == true: 普通 free，需要 allocated -= pages, free_count += 1
-        // count_as_free == false: cache flush，不再改 allocated/free_count
+        // count_as_free == false: 内部整理 free block，不再改 allocated/free_count
 
-        if addr % PAGE_SZ != 0 {
+        if real_order > self.max_order || addr % PAGE_SZ != 0 {
             return false;
         }
 
@@ -8425,14 +8352,17 @@ impl HeuristicAllocator {
         let mut current_order = real_order;
 
         while current_order < self.max_order {
-            let block_size = (1usize << current_order) * PAGE_SZ;
-            let rel = current_addr - self.base_addr;
-            let buddy_addr = self.base_addr + (rel ^ block_size);
+            if self.should_preserve_order_block(current_order) {
+                if self
+                    .find_free_buddy_pos(current_addr, current_order)
+                    .is_some()
+                {
+                    self.heuristic_statistics.preserve_count += 1;
+                }
+                break;
+            }
 
-            if let Some(pos) = self.free_lists[current_order]
-                .iter()
-                .position(|&a| a == buddy_addr)
-            {
+            if let Some((buddy_addr, pos)) = self.find_free_buddy_pos(current_addr, current_order) {
                 self.free_lists[current_order].remove(pos);
                 current_addr = min(current_addr, buddy_addr);
                 current_order += 1;
@@ -8452,48 +8382,260 @@ impl HeuristicAllocator {
         true
     }
 
-    fn flush_cache_order(&mut self, order: usize) {
-        // cache[order] 全部放回 free list
-        if order >= self.small_caches.len() {
+    fn try_fast_exact_alloc(&mut self, order: usize, align_pages: usize) -> Option<usize> {
+        if align_pages != 1 || order > self.max_order || self.free_lists[order].is_empty() {
+            return None;
+        }
+
+        if let Some(pos) = self.free_lists[order]
+            .iter()
+            .position(|&block| !self.has_free_buddy_at_order(block, order))
+        {
+            let block = self.free_lists[order][pos];
+            return Some(self.alloc_from_free_list(order, order, pos, block, block));
+        }
+
+        if self.free_lists[order].len() > self.target_blocks_at_order(order) {
+            let pos = self.free_lists[order].len() - 1;
+            let block = self.free_lists[order][pos];
+            return Some(self.alloc_from_free_list(order, order, pos, block, block));
+        }
+
+        None
+    }
+
+    fn alloc_from_free_list(
+        &mut self,
+        request_order: usize,
+        source_order: usize,
+        pos: usize,
+        block: usize,
+        target_addr: usize,
+    ) -> usize {
+        self.free_lists[source_order].remove(pos);
+
+        let mut current_order = source_order;
+        let mut addr = block;
+        while current_order > request_order {
+            current_order -= 1;
+            let half_size = (1usize << current_order) * PAGE_SZ;
+            let right = addr + half_size;
+            if target_addr < right {
+                self.free_lists[current_order].push(right);
+            } else {
+                self.free_lists[current_order].push(addr);
+                addr = right;
+            }
+            self.statistics.split_count += 1;
+        }
+
+        self.allocated
+            .fetch_add(1 << request_order, Ordering::Relaxed);
+        self.statistics.alloc_count += 1;
+        self.heuristic_statistics.free_list_alloc_count += 1;
+        if source_order == request_order {
+            self.statistics.exact_hit_count += 1;
+        }
+        self.addr_order_map.insert(addr, request_order);
+        addr
+    }
+
+    fn target_blocks_at_order(&self, order: usize) -> usize {
+        if order >= self.policy.protect_min_order {
+            return self.policy.high_order_target;
+        }
+
+        if order < self.dynamic_targets.len() {
+            self.dynamic_targets[order]
+        } else {
+            0
+        }
+    }
+
+    fn policy_base_targets(policy: &HeuristicPolicy) -> [usize; 4] {
+        [
+            policy.order0_base_target,
+            policy.order1_base_target,
+            policy.order2_base_target,
+            policy.order3_base_target,
+        ]
+    }
+
+    fn policy_max_targets(policy: &HeuristicPolicy) -> [usize; 4] {
+        let base = Self::policy_base_targets(policy);
+        [
+            max(policy.order0_max_target, base[0]),
+            max(policy.order1_max_target, base[1]),
+            max(policy.order2_max_target, base[2]),
+            max(policy.order3_max_target, base[3]),
+        ]
+    }
+
+    fn scaled_targets_for_pool(
+        total_pages: usize,
+        feedback_pool_fraction: usize,
+        raw_targets: [usize; 4],
+    ) -> [usize; 4] {
+        if total_pages == 0 {
+            return [0; 4];
+        }
+        if feedback_pool_fraction == 0 {
+            return raw_targets;
+        }
+
+        let budget_pages = max(1, total_pages / feedback_pool_fraction);
+        let raw_pages: usize = raw_targets
+            .iter()
+            .enumerate()
+            .map(|(order, &target)| target * (1usize << order))
+            .sum();
+
+        if raw_pages <= budget_pages {
+            return raw_targets;
+        }
+
+        let mut scaled = [0; 4];
+        let mut used_pages = 0;
+
+        for order in 0..scaled.len() {
+            let block_pages = 1usize << order;
+            let remaining_pages = budget_pages.saturating_sub(used_pages);
+            let cap_blocks = remaining_pages / block_pages;
+            scaled[order] = min(raw_targets[order], cap_blocks);
+            used_pages += scaled[order] * block_pages;
+        }
+
+        scaled
+    }
+
+    fn clamp_targets_to_policy_and_pool(&self, raw_targets: [usize; 4]) -> [usize; 4] {
+        let base = Self::policy_base_targets(&self.policy);
+        let max_targets = Self::policy_max_targets(&self.policy);
+        let mut clamped = [0; 4];
+
+        for order in 0..clamped.len() {
+            clamped[order] = min(max(raw_targets[order], base[order]), max_targets[order]);
+        }
+
+        Self::scaled_targets_for_pool(
+            self.total_pages,
+            self.policy.feedback_pool_fraction,
+            clamped,
+        )
+    }
+
+    fn scaled_base_targets(&self) -> [usize; 4] {
+        Self::scaled_targets_for_pool(
+            self.total_pages,
+            self.policy.feedback_pool_fraction,
+            Self::policy_base_targets(&self.policy),
+        )
+    }
+
+    fn record_alloc_request(&mut self, order: usize) {
+        if order < self.recent_allocs.len() {
+            self.recent_allocs[order] = self.recent_allocs[order].saturating_add(1);
+        }
+        self.feedback_ops = self.feedback_ops.saturating_add(1);
+        self.maybe_update_feedback_targets();
+    }
+
+    fn maybe_update_feedback_targets(&mut self) {
+        if self.policy.feedback_window_ops == 0 {
+            return;
+        }
+        if self.feedback_ops < self.policy.feedback_window_ops {
             return;
         }
 
-        let cached = std::mem::take(&mut self.small_caches[order]);
-        self.heuristic_statistics.cache_flush_count += cached.len();
+        self.recompute_dynamic_targets();
+        self.recent_allocs = [0; 4];
+        self.feedback_ops = 0;
+        self.heuristic_statistics.feedback_update_count += 1;
+    }
 
-        for addr in cached {
-            self.free_to_buddy(addr, order, false);
+    fn recompute_dynamic_targets(&mut self) {
+        let base = Self::policy_base_targets(&self.policy);
+        let max_targets = Self::policy_max_targets(&self.policy);
+        let total_recent_allocs: usize = self.recent_allocs.iter().sum();
+        let mut raw_targets = base;
+
+        if total_recent_allocs > 0 {
+            for order in 0..raw_targets.len() {
+                let max_bonus = max_targets[order].saturating_sub(base[order]);
+                let bonus = self.recent_allocs[order] * max_bonus / total_recent_allocs;
+                raw_targets[order] = base[order] + bonus;
+            }
+        }
+
+        self.dynamic_targets = self.clamp_targets_to_policy_and_pool(raw_targets);
+    }
+
+    fn decay_dynamic_targets_for_pressure(&mut self) {
+        let divisor = self.policy.pressure_decay_divisor;
+        if divisor <= 1 {
+            return;
+        }
+
+        let base = self.scaled_base_targets();
+        let mut changed = false;
+
+        for order in 0..self.dynamic_targets.len() {
+            let decayed = max(base[order], self.dynamic_targets[order] / divisor);
+            if decayed < self.dynamic_targets[order] {
+                self.dynamic_targets[order] = decayed;
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.heuristic_statistics.pressure_decay_count += 1;
         }
     }
 
-    fn flush_all_caches(&mut self) {
-        for order in 0..self.small_caches.len() {
-            self.flush_cache_order(order);
-        }
-        self.leave_merge_pressure();
-    }
-
-    fn has_free_buddy_in_buddy(&self, addr: usize, order: usize) -> bool {
-        if order >= self.max_order {
+    fn should_preserve_order_block(&self, order: usize) -> bool {
+        if self.merge_pressure {
             return false;
+        }
+
+        let target = self.target_blocks_at_order(order);
+        target > 0 && self.exact_free_blocks_at_order(order) < target
+    }
+
+    fn buddy_addr(&self, addr: usize, order: usize) -> Option<usize> {
+        if order >= self.max_order || addr < self.base_addr {
+            return None;
         }
 
         let block_size = (1usize << order) * PAGE_SZ;
         let rel = addr - self.base_addr;
         let buddy_addr = self.base_addr + (rel ^ block_size);
+        let end = self.base_addr + self.total_pages * PAGE_SZ;
 
-        self.free_lists[order].iter().any(|&a| a == buddy_addr)
+        if buddy_addr < self.base_addr || buddy_addr + block_size > end {
+            return None;
+        }
+
+        Some(buddy_addr)
     }
 
-    fn target_blocks_at_order(&self, order: usize) -> usize {
-        if order < self.policy.protect_min_order {
-            0
-        } else {
-            self.policy.protect_reserve_blocks
-        }
+    fn find_free_buddy_pos(&self, addr: usize, order: usize) -> Option<(usize, usize)> {
+        let buddy_addr = self.buddy_addr(addr, order)?;
+        let pos = self.free_lists[order]
+            .iter()
+            .position(|&a| a == buddy_addr)?;
+        Some((buddy_addr, pos))
+    }
+
+    fn has_free_buddy_at_order(&self, addr: usize, order: usize) -> bool {
+        self.find_free_buddy_pos(addr, order).is_some()
     }
 
     fn effective_free_blocks_at_order(&self, order: usize) -> usize {
+        if order > self.max_order {
+            return 0;
+        }
+
         let mut count = 0;
 
         // 高阶块可拆的情况下也算进去
@@ -8501,30 +8643,50 @@ impl HeuristicAllocator {
             count += self.free_lists[source_order].len() * (1usize << (source_order - order));
         }
 
-        if order < self.small_caches.len() {
-            count += self.small_caches[order].len();
-        }
-
         count
     }
 
-    fn high_order_under_target(&self) -> bool {
-        if self.policy.protect_reserve_blocks == 0 {
-            return false;
+    fn exact_free_blocks_at_order(&self, order: usize) -> usize {
+        if order > self.max_order {
+            return 0;
+        }
+
+        self.free_lists[order].len()
+    }
+
+    fn exact_deficit_at_order(&self, order: usize) -> usize {
+        let target = self.target_blocks_at_order(order);
+        target.saturating_sub(self.exact_free_blocks_at_order(order))
+    }
+
+    fn exact_surplus_at_order(&self, order: usize) -> usize {
+        let target = self.target_blocks_at_order(order);
+        self.exact_free_blocks_at_order(order)
+            .saturating_sub(target)
+    }
+
+    fn first_high_order_under_target(&self) -> Option<usize> {
+        if self.policy.high_order_target == 0 {
+            return None;
         }
 
         for order in self.policy.protect_min_order..=self.max_order {
             if self.effective_free_blocks_at_order(order) < self.target_blocks_at_order(order) {
-                return true;
+                return Some(order);
             }
         }
 
-        false
+        None
+    }
+
+    fn high_order_under_target(&self) -> bool {
+        self.first_high_order_under_target().is_some()
     }
 
     fn enter_merge_pressure(&mut self) {
         if !self.merge_pressure {
             self.heuristic_statistics.pressure_enter_count += 1;
+            self.decay_dynamic_targets_for_pressure();
         }
         self.merge_pressure = true;
     }
@@ -8536,9 +8698,129 @@ impl HeuristicAllocator {
         }
     }
 
-    fn should_bypass_cache(&self, addr: usize, order: usize) -> bool {
-        self.merge_pressure
-            && self.has_free_buddy_in_buddy(addr, order)
-            && self.high_order_under_target()
+    fn try_coalesce_order_once(&mut self, order: usize) -> bool {
+        if order >= self.max_order {
+            return false;
+        }
+
+        let len = self.free_lists[order].len();
+        for i in 0..len {
+            let addr = self.free_lists[order][i];
+            if let Some((buddy_addr, j)) = self.find_free_buddy_pos(addr, order) {
+                if i == j {
+                    continue;
+                }
+
+                let (first, second) = if i > j { (i, j) } else { (j, i) };
+                self.free_lists[order].remove(first);
+                self.free_lists[order].remove(second);
+                self.free_lists[order + 1].push(min(addr, buddy_addr));
+                self.statistics.merge_count += 1;
+                self.heuristic_statistics.active_coalesce_count += 1;
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn coalesce_free_lists_for_pressure(&mut self) -> bool {
+        if self.first_high_order_under_target().is_none() {
+            return false;
+        }
+
+        self.enter_merge_pressure();
+        let mut coalesced = false;
+
+        loop {
+            if self.first_high_order_under_target().is_none() {
+                self.leave_merge_pressure();
+                return coalesced;
+            }
+
+            let mut coalesced_this_pass = false;
+            self.heuristic_statistics.active_coalesce_pass_count += 1;
+
+            for order in 0..self.max_order {
+                if self.first_high_order_under_target().is_none() {
+                    break;
+                }
+
+                if self.try_coalesce_order_once(order) {
+                    coalesced = true;
+                    coalesced_this_pass = true;
+                }
+            }
+
+            if !coalesced_this_pass {
+                return coalesced;
+            }
+        }
+    }
+
+    fn alloc_candidate_score(
+        &self,
+        request_order: usize,
+        source_order: usize,
+        candidate_addr: usize,
+        target_addr: usize,
+    ) -> isize {
+        let split_cost = (source_order - request_order) as isize * Self::SPLIT_COST_PER_ORDER;
+        let mut refill_bonus = 0isize;
+
+        let source_exact = self.exact_free_blocks_at_order(source_order);
+        let projected_source_exact = source_exact.saturating_sub(1);
+        let reserve_penalty =
+            self.projected_exact_deficit_penalty(source_order, projected_source_exact);
+
+        for leftover_order in request_order..source_order {
+            if self.exact_deficit_at_order(leftover_order) > 0 {
+                refill_bonus += Self::REFILL_BONUS_PER_ORDER;
+            }
+        }
+
+        split_cost + reserve_penalty - refill_bonus
+            + self.local_alloc_topology_penalty(
+                request_order,
+                source_order,
+                candidate_addr,
+                target_addr,
+            )
+    }
+
+    fn projected_exact_deficit_penalty(&self, order: usize, projected_exact: usize) -> isize {
+        let target = self.target_blocks_at_order(order);
+        if target == 0 || projected_exact >= target || self.exact_surplus_at_order(order) > 0 {
+            return 0;
+        }
+
+        Self::RESERVE_DEFICIT_PENALTY
+    }
+
+    fn min_possible_alloc_score(&self, request_order: usize, source_order: usize) -> isize {
+        if source_order == request_order {
+            return Self::ISOLATED_EXACT_BONUS;
+        }
+
+        let split_levels = (source_order - request_order) as isize;
+        split_levels * (Self::SPLIT_COST_PER_ORDER - Self::REFILL_BONUS_PER_ORDER)
+    }
+
+    fn local_alloc_topology_penalty(
+        &self,
+        request_order: usize,
+        source_order: usize,
+        candidate_addr: usize,
+        target_addr: usize,
+    ) -> isize {
+        if source_order != request_order || candidate_addr != target_addr {
+            return 0;
+        }
+
+        if self.has_free_buddy_at_order(candidate_addr, request_order) {
+            Self::MERGEABLE_EXACT_PENALTY
+        } else {
+            Self::ISOLATED_EXACT_BONUS
+        }
     }
 }

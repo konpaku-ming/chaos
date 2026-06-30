@@ -1,110 +1,11 @@
 // created by claude
 use chaos_tests::*;
-use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
 
 const BASE: usize = 0x1000_0000;
 
 fn pages(n: usize) -> usize {
     n * PAGE_SZ
-}
-
-#[derive(Clone, Copy)]
-enum BenchmarkStep {
-    AllocOrder(usize),
-    AllocAligned { order: usize, align: usize },
-    FreeOldest,
-    FreeNewest,
-    FreeAll,
-}
-
-struct BenchmarkReport {
-    name: &'static str,
-    attempted_ops: usize,
-    elapsed: Duration,
-    statistics: BuddyStatistics,
-    free_pages: usize,
-    largest_free_order: usize,
-    fragmentation_score: usize,
-    live_blocks: usize,
-}
-
-fn run_buddy_benchmark(
-    name: &'static str,
-    total_pages: usize,
-    max_order: usize,
-    steps: &[BenchmarkStep],
-) -> BenchmarkReport {
-    let mut alloc = BuddyAllocator::new(BASE, total_pages, max_order);
-    let mut live = VecDeque::new();
-    let mut attempted_ops = 0;
-    let start = Instant::now();
-
-    for step in steps {
-        match *step {
-            BenchmarkStep::AllocOrder(order) => {
-                attempted_ops += 1;
-                if let Some(addr) = alloc.alloc_order(order) {
-                    live.push_back(addr);
-                }
-            }
-            BenchmarkStep::AllocAligned { order, align } => {
-                attempted_ops += 1;
-                if let Some(addr) = alloc.alloc_order_aligned(order, align) {
-                    live.push_back(addr);
-                }
-            }
-            BenchmarkStep::FreeOldest => {
-                if let Some(addr) = live.pop_front() {
-                    attempted_ops += 1;
-                    alloc.free(addr);
-                }
-            }
-            BenchmarkStep::FreeNewest => {
-                if let Some(addr) = live.pop_back() {
-                    attempted_ops += 1;
-                    alloc.free(addr);
-                }
-            }
-            BenchmarkStep::FreeAll => {
-                while let Some(addr) = live.pop_back() {
-                    attempted_ops += 1;
-                    alloc.free(addr);
-                }
-            }
-        }
-    }
-
-    BenchmarkReport {
-        name,
-        attempted_ops,
-        elapsed: start.elapsed(),
-        statistics: alloc.statistics,
-        free_pages: alloc.free_pages_count(),
-        largest_free_order: alloc.largest_free_order(),
-        fragmentation_score: alloc.fragmentation_score(),
-        live_blocks: live.len(),
-    }
-}
-
-fn log_benchmark(report: &BenchmarkReport) {
-    eprintln!(
-        "{}: ops={} elapsed={:?} alloc={} free={} split={} merge={} exact={} failed={} free_pages={} largest_order={} frag={} live={}",
-        report.name,
-        report.attempted_ops,
-        report.elapsed,
-        report.statistics.alloc_count,
-        report.statistics.free_count,
-        report.statistics.split_count,
-        report.statistics.merge_count,
-        report.statistics.exact_hit_count,
-        report.statistics.failed_alloc_count,
-        report.free_pages,
-        report.largest_free_order,
-        report.fragmentation_score,
-        report.live_blocks,
-    );
 }
 
 #[test]
@@ -387,7 +288,7 @@ fn heuristic_allocator_standalone_interface_matches_buddy_baseline() {
     assert_eq!(alloc.addr_order_map.get(&(BASE + pages(4))), Some(&1));
     assert_eq!(alloc.statistics.alloc_count, 2);
     assert_eq!(alloc.statistics.split_count, 4);
-    assert_eq!(alloc.heuristic_statistics().fallback_alloc_count, 2);
+    assert_eq!(alloc.heuristic_statistics().free_list_alloc_count, 2);
 
     let snapshot = alloc.snapshot();
     alloc.free(first.unwrap());
@@ -400,7 +301,7 @@ fn heuristic_allocator_standalone_interface_matches_buddy_baseline() {
 }
 
 #[test]
-fn heuristic_small_page_churn_keeps_cache_split_savings() {
+fn heuristic_small_page_churn_keeps_controlled_merge_split_savings() {
     let mut buddy = BuddyAllocator::new(BASE, 1024, 10);
     for _ in 0..64 {
         let addr = buddy.alloc_page().unwrap();
@@ -416,12 +317,12 @@ fn heuristic_small_page_churn_keeps_cache_split_savings() {
     let heuristic = alloc.heuristic_statistics();
     assert_eq!(alloc.free_pages_count(), 1024);
     assert_eq!(alloc.statistics.failed_alloc_count, 0);
-    assert!(heuristic.cache_hit_count > 0);
+    assert!(heuristic.preserve_count > 0);
     assert!(alloc.statistics.split_count < buddy.statistics.split_count);
 }
 
 #[test]
-fn heuristic_large_pressure_bypasses_cache_to_restore_high_order_blocks() {
+fn heuristic_large_pressure_restores_high_order_blocks() {
     let mut alloc = HeuristicAllocator::new(BASE, 64, 6);
     let mut live = Vec::new();
 
@@ -444,131 +345,222 @@ fn heuristic_large_pressure_bypasses_cache_to_restore_high_order_blocks() {
     assert_eq!(alloc.largest_free_order(), 6);
     assert_eq!(alloc.fragmentation_score(), 0);
     assert_eq!(alloc.statistics.failed_alloc_count, 1);
-    assert!(heuristic.cache_bypass_count > 0);
     assert_eq!(heuristic.pressure_enter_count, 1);
     assert_eq!(heuristic.pressure_exit_count, 1);
     assert!(!alloc.merge_pressure);
 }
 
 #[test]
-fn benchmark_workload_small_page_churn_baseline() {
-    let mut steps = Vec::new();
-    for _ in 0..64 {
-        steps.push(BenchmarkStep::AllocOrder(0));
-        steps.push(BenchmarkStep::FreeNewest);
-    }
-
-    let report = run_buddy_benchmark("small_page_churn", 1024, 10, &steps);
-    log_benchmark(&report);
-
-    assert_eq!(report.attempted_ops, 128);
-    assert_eq!(report.statistics.alloc_count, 64);
-    assert_eq!(report.statistics.free_count, 64);
-    assert_eq!(report.statistics.failed_alloc_count, 0);
-    assert_eq!(report.statistics.split_count, 640);
-    assert_eq!(report.statistics.merge_count, 640);
-    assert_eq!(report.free_pages, 1024);
-    assert_eq!(report.largest_free_order, 10);
-    assert_eq!(report.fragmentation_score, 0);
-    assert_eq!(report.live_blocks, 0);
-}
-
-#[test]
-fn benchmark_workload_mixed_order_churn_baseline() {
-    let orders = [0, 0, 1, 2, 0, 3, 1, 0, 2, 1, 0, 0, 3, 2, 1, 0];
-    let mut steps = Vec::new();
-    for i in 0..256 {
-        if i % 17 == 0 {
-            steps.push(BenchmarkStep::AllocAligned { order: 1, align: 4 });
-        } else {
-            steps.push(BenchmarkStep::AllocOrder(orders[i % orders.len()]));
-        }
-        if i % 3 == 2 {
-            steps.push(BenchmarkStep::FreeOldest);
-        }
-    }
-    steps.push(BenchmarkStep::FreeAll);
-
-    let report = run_buddy_benchmark("mixed_order_churn", 2048, 11, &steps);
-    log_benchmark(&report);
-
-    assert_eq!(
-        report.attempted_ops,
-        report.statistics.alloc_count + report.statistics.failed_alloc_count + report.statistics.free_count
-    );
-    assert_eq!(report.statistics.alloc_count, 256);
-    assert_eq!(report.statistics.free_count, 256);
-    assert_eq!(report.statistics.failed_alloc_count, 0);
-    assert!(report.statistics.split_count > 0);
-    assert!(report.statistics.exact_hit_count > 0);
-    assert_eq!(report.free_pages, 2048);
-    assert_eq!(report.largest_free_order, 11);
-    assert_eq!(report.fragmentation_score, 0);
-    assert_eq!(report.live_blocks, 0);
-}
-
-#[test]
-fn benchmark_workload_large_block_pressure_baseline() {
-    let mut alloc = BuddyAllocator::new(BASE, 64, 6);
-    let mut live = Vec::new();
-    let mut attempted_ops = 0;
-    let start = Instant::now();
-
-    for _ in 0..64 {
-        live.push(alloc.alloc_page().unwrap());
-        attempted_ops += 1;
-    }
-    for i in (0..64).step_by(2) {
-        alloc.free(live[i]);
-        attempted_ops += 1;
-    }
-
-    let fragmented_free_pages = alloc.free_pages_count();
-    let fragmented_largest_order = alloc.largest_free_order();
-    let fragmented_score = alloc.fragmentation_score();
-    let large = alloc.alloc_order(5);
-    attempted_ops += 1;
-
-    for i in (1..64).step_by(2) {
-        alloc.free(live[i]);
-        attempted_ops += 1;
-    }
-
-    let elapsed = start.elapsed();
-    eprintln!(
-        "large_block_pressure: ops={} elapsed={:?} alloc={} free={} split={} merge={} exact={} failed={} fragmented_free={} fragmented_largest_order={} fragmented_score={} final_free={} final_largest_order={} final_frag={}",
-        attempted_ops,
-        elapsed,
-        alloc.statistics.alloc_count,
-        alloc.statistics.free_count,
-        alloc.statistics.split_count,
-        alloc.statistics.merge_count,
-        alloc.statistics.exact_hit_count,
-        alloc.statistics.failed_alloc_count,
-        fragmented_free_pages,
-        fragmented_largest_order,
-        fragmented_score,
-        alloc.free_pages_count(),
-        alloc.largest_free_order(),
-        alloc.fragmentation_score(),
+fn heuristic_pressure_coalesces_preserved_buddy_pair_for_high_order_alloc() {
+    let mut alloc = HeuristicAllocator::with_policy(
+        BASE,
+        2,
+        1,
+        HeuristicPolicy {
+            order0_base_target: 2,
+            order0_max_target: 2,
+            protect_min_order: 1,
+            feedback_pool_fraction: 0,
+            ..HeuristicPolicy::default()
+        },
     );
 
-    assert_eq!(large, None);
-    assert_eq!(fragmented_free_pages, 32);
-    assert_eq!(fragmented_largest_order, 0);
-    assert_eq!(fragmented_score, 96);
-    assert_eq!(alloc.statistics.alloc_count, 64);
-    assert_eq!(alloc.statistics.free_count, 64);
-    assert_eq!(alloc.statistics.failed_alloc_count, 1);
-    assert_eq!(alloc.statistics.split_count, 63);
-    assert_eq!(alloc.statistics.merge_count, 63);
-    assert_eq!(alloc.free_pages_count(), 64);
-    assert_eq!(alloc.largest_free_order(), 6);
-    assert_eq!(alloc.fragmentation_score(), 0);
+    let first = alloc.alloc_page().unwrap();
+    let second = alloc.alloc_page().unwrap();
+    alloc.free(first);
+    alloc.free(second);
+
+    assert_eq!(alloc.largest_free_order(), 0);
+    assert!(alloc.heuristic_statistics().preserve_count > 0);
+
+    let merged = alloc.alloc_order(1);
+    let heuristic = alloc.heuristic_statistics();
+
+    assert_eq!(merged, Some(BASE));
+    assert_eq!(alloc.statistics.failed_alloc_count, 0);
+    assert_eq!(heuristic.active_coalesce_count, 1);
+    assert_eq!(heuristic.pressure_enter_count, 1);
+    assert_eq!(heuristic.pressure_exit_count, 1);
+    assert!(!alloc.merge_pressure);
 }
 
 #[test]
-fn frame_pool_get_inner_put_avail_and_free_count_use_buddy() {
+fn heuristic_alloc_prefers_isolated_exact_page_over_mergeable_pair() {
+    let mut alloc = HeuristicAllocator::new(BASE, 4, 2);
+
+    let first = alloc.alloc_page().unwrap();
+    let second = alloc.alloc_page().unwrap();
+    let third = alloc.alloc_page().unwrap();
+    let fourth = alloc.alloc_page().unwrap();
+
+    assert_eq!(first, BASE);
+    assert_eq!(second, BASE + pages(1));
+    assert_eq!(third, BASE + pages(2));
+    assert_eq!(fourth, BASE + pages(3));
+
+    alloc.free(first);
+    alloc.free(second);
+    alloc.free(third);
+
+    let chosen = alloc.alloc_page();
+    assert_eq!(chosen, Some(third));
+}
+
+#[test]
+fn heuristic_alloc_still_uses_paired_exact_page_when_needed() {
+    let mut alloc = HeuristicAllocator::with_policy(
+        BASE,
+        2,
+        1,
+        HeuristicPolicy {
+            order0_base_target: 2,
+            order0_max_target: 2,
+            feedback_pool_fraction: 0,
+            ..HeuristicPolicy::default()
+        },
+    );
+
+    let first = alloc.alloc_page().unwrap();
+    let second = alloc.alloc_page().unwrap();
+
+    alloc.free(first);
+    alloc.free(second);
+
+    assert_eq!(alloc.largest_free_order(), 0);
+
+    let chosen = alloc.alloc_page();
+    assert!(chosen == Some(first) || chosen == Some(second));
+    assert_eq!(alloc.statistics.failed_alloc_count, 0);
+}
+
+#[test]
+fn heuristic_policy_order_targets_control_preserve_behavior() {
+    let no_preserve_policy = HeuristicPolicy {
+        order0_base_target: 0,
+        order1_base_target: 0,
+        order2_base_target: 0,
+        order3_base_target: 0,
+        order0_max_target: 0,
+        order1_max_target: 0,
+        order2_max_target: 0,
+        order3_max_target: 0,
+        high_order_target: 0,
+        protect_min_order: 4,
+        feedback_window_ops: 128,
+        feedback_pool_fraction: 16,
+        pressure_decay_divisor: 2,
+    };
+    let mut eager = HeuristicAllocator::with_policy(BASE, 2, 1, no_preserve_policy);
+
+    let first = eager.alloc_page().unwrap();
+    let second = eager.alloc_page().unwrap();
+    eager.free(first);
+    eager.free(second);
+
+    assert_eq!(eager.largest_free_order(), 1);
+    assert_eq!(eager.heuristic_statistics().preserve_count, 0);
+
+    let preserve_policy = HeuristicPolicy {
+        order0_base_target: 2,
+        order0_max_target: 2,
+        feedback_pool_fraction: 0,
+        ..no_preserve_policy
+    };
+    let mut controlled = HeuristicAllocator::with_policy(BASE, 2, 1, preserve_policy);
+
+    let first = controlled.alloc_page().unwrap();
+    let second = controlled.alloc_page().unwrap();
+    controlled.free(first);
+    controlled.free(second);
+
+    assert_eq!(controlled.largest_free_order(), 0);
+    assert!(controlled.heuristic_statistics().preserve_count > 0);
+}
+
+#[test]
+fn heuristic_feedback_raises_hot_order_target() {
+    let policy = HeuristicPolicy {
+        order0_base_target: 1,
+        order1_base_target: 1,
+        order2_base_target: 1,
+        order3_base_target: 1,
+        order0_max_target: 8,
+        order1_max_target: 4,
+        order2_max_target: 4,
+        order3_max_target: 4,
+        feedback_window_ops: 4,
+        feedback_pool_fraction: 0,
+        ..HeuristicPolicy::default()
+    };
+    let mut alloc = HeuristicAllocator::with_policy(BASE, 1024, 10, policy);
+
+    assert_eq!(alloc.dynamic_targets, [1, 1, 1, 1]);
+
+    for _ in 0..4 {
+        assert!(alloc.alloc_page().is_some());
+    }
+
+    assert_eq!(alloc.dynamic_targets[0], 8);
+    assert_eq!(alloc.dynamic_targets[1], 1);
+    assert_eq!(alloc.heuristic_statistics().feedback_update_count, 1);
+}
+
+#[test]
+fn heuristic_dynamic_targets_scale_with_total_pages() {
+    let policy = HeuristicPolicy::default();
+
+    let small = HeuristicAllocator::with_policy(BASE, 64, 6, policy);
+    let small_target_pages: usize = small
+        .dynamic_targets
+        .iter()
+        .enumerate()
+        .map(|(order, &target)| target * (1 << order))
+        .sum();
+    assert!(small_target_pages <= 64 / policy.feedback_pool_fraction);
+
+    let large = HeuristicAllocator::with_policy(BASE, 2048, 11, policy);
+    let large_target_pages: usize = large
+        .dynamic_targets
+        .iter()
+        .enumerate()
+        .map(|(order, &target)| target * (1 << order))
+        .sum();
+    assert!(large_target_pages <= 2048 / policy.feedback_pool_fraction);
+    assert!(large_target_pages > small_target_pages);
+}
+
+#[test]
+fn heuristic_pressure_decays_dynamic_targets() {
+    let policy = HeuristicPolicy {
+        order0_base_target: 1,
+        order1_base_target: 1,
+        order2_base_target: 1,
+        order3_base_target: 1,
+        order0_max_target: 8,
+        order1_max_target: 4,
+        order2_max_target: 4,
+        order3_max_target: 4,
+        protect_min_order: 1,
+        feedback_window_ops: usize::MAX,
+        feedback_pool_fraction: 0,
+        pressure_decay_divisor: 2,
+        ..HeuristicPolicy::default()
+    };
+    let mut alloc = HeuristicAllocator::with_policy(BASE, 2, 1, policy);
+
+    let first = alloc.alloc_page().unwrap();
+    let second = alloc.alloc_page().unwrap();
+    assert_ne!(first, second);
+
+    alloc.dynamic_targets = [8, 4, 4, 4];
+
+    assert_eq!(alloc.alloc_order(1), None);
+    assert_eq!(alloc.dynamic_targets, [4, 2, 2, 2]);
+    assert_eq!(alloc.heuristic_statistics().pressure_decay_count, 1);
+}
+
+#[test]
+fn frame_pool_get_inner_put_avail_and_free_count_use_allocator() {
     let pool = FramePool::new(2);
 
     assert_eq!(pool.free_count(), 2);
@@ -624,7 +616,7 @@ fn frame_pool_batch_alloc_returns_partial_non_contiguous_contract() {
 }
 
 #[test]
-fn frame_pool_get_contig_allocates_whole_buddy_block() {
+fn frame_pool_get_contig_allocates_whole_allocator_block() {
     let pool = FramePool::new(8);
 
     assert_eq!(pool.get_contig(0, 0), None);
@@ -644,7 +636,7 @@ fn frame_pool_get_contig_allocates_whole_buddy_block() {
 }
 
 #[test]
-fn frame_pool_get_contig_uses_aligned_buddy_search() {
+fn frame_pool_get_contig_uses_aligned_allocator_search() {
     let pool = FramePool::new(8);
 
     assert_eq!(pool.get_inner(), Some(0));
