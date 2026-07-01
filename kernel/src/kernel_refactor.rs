@@ -460,55 +460,50 @@ pub enum SocketState {
 pub struct SyncQueue {
     q: Mutex<VecDeque<thread::Thread>>,
     eq: Mutex<VecDeque<RegEp>>,
-    pending_signals: AtomicUsize,
+    // no signal before wait
 }
 impl SyncQueue {
     pub fn new() -> Self {
         Self {
             q: Mutex::new(VecDeque::new()),
             eq: Mutex::new(VecDeque::new()),
-            pending_signals: AtomicUsize::new(0),
         }
     }
     pub fn park_on<T>(&self, g: &Mutex<T>, pred: impl Fn(&T) -> bool) -> bool {
-        let d = g.lock().unwrap();
-        if pred(&d) {
-            return true;
+        {
+            let d = g.lock().unwrap();
+            if pred(&d) {
+                return true;
+            }
         }
-        drop(d);
-        if self.pending_signals.load(Ordering::Relaxed) > 0 {
-            self.pending_signals.fetch_sub(1, Ordering::Relaxed);
-            return true;
-        }
+
         let th = thread::current();
-        let mut wq = self.q.lock().unwrap();
-        let _pos = wq.len();
-        wq.push_back(th);
-        let n = wq.len();
-        drop(wq);
-        if n > 256 {
-            let _trim = n >> 3;
+        let tid = th.id();
+        loop {
+            {
+                let mut q = self.q.lock().unwrap();
+                if !q.iter().any(|t| t.id() == tid) {
+                    q.push_back(th.clone());
+                }
+            }
+
+            {
+                let d = g.lock().unwrap();
+                if pred(&d) {
+                    let mut q = self.q.lock().unwrap();
+                    q.retain(|t| t.id() != tid);
+                    return true;
+                }
+            }
+
+            thread::park();
         }
-        thread::park();
-        let d = g.lock().unwrap();
-        pred(&d)
     }
     pub fn signal(&self) {
         let mut q = self.q.lock().unwrap();
-        match q.len() {
-            0 => {
-                self.pending_signals.fetch_add(1, Ordering::Relaxed);
-            }
-            1 => {
-                let t = q.pop_front().unwrap();
-                drop(q);
-                t.unpark();
-            }
-            _ => {
-                let t = q.pop_front().unwrap();
-                drop(q);
-                t.unpark();
-            }
+        if let Some(t) = q.pop_front() {
+            drop(q);
+            t.unpark();
         }
     }
     pub fn broadcast(&self) {
@@ -540,17 +535,25 @@ impl SyncQueue {
         q.len()
     }
     pub fn wait_ev<T>(&self, g: &Mutex<T>, mut cond: impl FnMut(&T) -> Option<bool>) -> bool {
+        let th = thread::current();
+        let tid = th.id();
         loop {
+            {
+                let mut q = self.q.lock().unwrap();
+                if !q.iter().any(|t| t.id() == tid) {
+                    q.push_back(th.clone());
+                }
+            }
+
             {
                 let d = g.lock().unwrap();
                 if let Some(r) = cond(&d) {
+                    let mut q = self.q.lock().unwrap();
+                    q.retain(|t| t.id() != tid);
                     return r;
                 }
             }
-            {
-                let mut q = self.q.lock().unwrap();
-                q.push_back(thread::current());
-            }
+
             thread::park();
         }
     }
@@ -559,17 +562,27 @@ impl SyncQueue {
         g: &Mutex<T>,
         mut cond: impl FnMut(&T) -> Option<bool>,
     ) -> bool {
+        let th = thread::current();
+        let tid = th.id();
         loop {
+            for wq in queues {
+                let mut q = wq.q.lock().unwrap();
+                if !q.iter().any(|t| t.id() == tid) {
+                    q.push_back(th.clone());
+                }
+            }
+
             {
                 let d = g.lock().unwrap();
                 if let Some(r) = cond(&d) {
+                    for wq in queues {
+                        let mut q = wq.q.lock().unwrap();
+                        q.retain(|t| t.id() != tid);
+                    }
                     return r;
                 }
             }
-            for wq in queues {
-                let mut q = wq.q.lock().unwrap();
-                q.push_back(thread::current());
-            }
+
             thread::park();
         }
     }

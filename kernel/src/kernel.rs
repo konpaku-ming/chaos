@@ -305,6 +305,7 @@ unsafe impl Send for KernLock {}
 unsafe impl Sync for KernLock {}
 pub static GKL: KernLock = KernLock::new();
 
+// ZoneInfo：记录某个内存 zone 的容量、水位线和空闲页帧情况。
 pub struct ZoneInfo {
     pub zone_id: usize,
     pub base_pfn: usize,
@@ -315,6 +316,8 @@ pub struct ZoneInfo {
     pub managed: AtomicBool,
 }
 
+
+// CircBuf：环形缓冲区，用于 Channel。
 pub struct CircBuf {
     pub data: Vec<u8>,
     pub rd: usize,
@@ -323,6 +326,7 @@ pub struct CircBuf {
     pub n: usize,
 }
 
+// Spin：自旋锁
 pub struct Spin {
     v: AtomicBool,
 }
@@ -346,6 +350,7 @@ impl Spin {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
     }
+    // 没有检查持有
     pub fn release(&self) {
         self.v.store(false, Ordering::Release);
     }
@@ -356,6 +361,7 @@ impl Spin {
 unsafe impl Send for Spin {}
 unsafe impl Sync for Spin {}
 
+// ???
 pub struct FlgGuard(usize);
 impl FlgGuard {
     pub fn enter() -> Self {
@@ -366,6 +372,7 @@ impl Drop for FlgGuard {
     fn drop(&mut self) {}
 }
 
+// EvFlag：事件标志位集合
 pub struct EvFlag;
 impl EvFlag {
     pub const READABLE: u32 = 1 << 0;
@@ -381,6 +388,7 @@ impl EvFlag {
 
 pub type EvCb = Box<dyn Fn(u32) -> bool + Send>;
 
+// EvBus：当前事件状态 & callback 列表
 #[derive(Default)]
 pub struct EvBus {
     pub ev: u32,
@@ -400,7 +408,7 @@ impl EvBus {
         let orig = self.ev;
         self.ev = (self.ev & !rst) | s;
         if self.ev != orig {
-            self.cbs.retain(|f| !f(self.ev));
+            self.cbs.retain(|f| !f(self.ev)); // callback
         }
     }
     pub fn sub(&mut self, cb: Box<dyn Fn(u32) -> bool + Send>) {
@@ -423,12 +431,14 @@ pub fn wait_ev(bus: &Arc<Mutex<EvBus>>, mask: u32) -> u32 {
     }
 }
 
+// RegEp：注册到 epoll 的信息
 pub struct RegEp {
     pub task_id: usize,
     pub epfd: usize,
     pub fd: usize,
 }
 
+// SlabEntry：记录对象大小、占用状态和调试信息
 pub struct SlabEntry {
     pub data: Vec<u8>,
     pub obj_size: usize,
@@ -438,6 +448,7 @@ pub struct SlabEntry {
     pub tag: u32,
 }
 
+// SocketState：socket 的状态
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SocketState {
     Closed,
@@ -453,9 +464,10 @@ pub enum SocketState {
     Closing,
 }
 
+// SyncQueue：同步等待队列
 pub struct SyncQueue {
-    q: Mutex<VecDeque<thread::Thread>>,
-    eq: Mutex<VecDeque<RegEp>>,
+    q: Mutex<VecDeque<thread::Thread>>, // waiting thread
+    eq: Mutex<VecDeque<RegEp>>, // RegEp
     pending_signals: AtomicUsize,
 }
 impl SyncQueue {
