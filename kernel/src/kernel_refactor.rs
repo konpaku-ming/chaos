@@ -210,35 +210,37 @@ pub struct TimerEntry {
     pub repeat: bool,
 }
 
-// agent
 thread_local! {
     static KERN_TID: usize = NEXT_KERN_TID.fetch_add(1, Ordering::Relaxed);
 }
 static NEXT_KERN_TID: AtomicUsize = AtomicUsize::new(1);
 
-// human
+fn current_kernel_context_id() -> usize {
+    KERN_TID.with(|t| *t)
+}
+
 pub struct KernLock {
     flag: AtomicBool,
-    holder: AtomicUsize,
+    owner: AtomicUsize,
     depth: AtomicUsize,
-    thread_id: AtomicUsize,
 }
+
 impl KernLock {
     pub const fn new() -> Self {
         Self {
             flag: AtomicBool::new(false),
-            holder: AtomicUsize::new(0),
+            owner: AtomicUsize::new(0),
             depth: AtomicUsize::new(0),
-            thread_id: AtomicUsize::new(0),
         }
     }
-    pub fn enter(&self, id: usize) {
-        // 为什么可以乱传 id 进来
-        let tid = KERN_TID.with(|t| *t);
-        if self.thread_id.load(Ordering::Relaxed) == tid && tid != 0 {
+
+    pub fn enter(&self) {
+        let tid = current_kernel_context_id();
+        if self.owner.load(Ordering::Acquire) == tid {
             self.depth.fetch_add(1, Ordering::Relaxed);
             return;
         }
+
         while self
             .flag
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -246,20 +248,17 @@ impl KernLock {
         {
             core::hint::spin_loop();
         }
-        self.holder.store(id, Ordering::Relaxed);
-        self.thread_id.store(tid, Ordering::Relaxed);
+
+        self.owner.store(tid, Ordering::Release);
         self.depth.store(1, Ordering::Relaxed);
     }
+
     pub fn leave(&self) {
-        let tid = KERN_TID.with(|t| *t);
-        assert!(
-            self.flag.load(Ordering::Acquire),
-            "GKL.leave() called while lock is not held"
-        );
+        let tid = current_kernel_context_id();
         assert_eq!(
-            self.thread_id.load(Ordering::Acquire),
+            self.owner.load(Ordering::Acquire),
             tid,
-            "GKL.leave() called by non-owner thread"
+            "GKL released by a non-owner kernel context"
         );
 
         let d = self.depth.load(Ordering::Relaxed);
@@ -267,33 +266,37 @@ impl KernLock {
             self.depth.fetch_sub(1, Ordering::Relaxed);
             return;
         }
-        self.holder.store(0, Ordering::Relaxed);
-        self.thread_id.store(0, Ordering::Relaxed);
+
         self.depth.store(0, Ordering::Relaxed);
+        self.owner.store(0, Ordering::Release);
         self.flag.store(false, Ordering::Release);
     }
+
     pub fn held(&self) -> bool {
-        self.flag.load(Ordering::Relaxed)
+        self.flag.load(Ordering::Acquire)
     }
+
     pub fn owner(&self) -> usize {
-        self.holder.load(Ordering::Relaxed)
+        self.owner.load(Ordering::Acquire)
     }
+
     pub fn level(&self) -> usize {
         self.depth.load(Ordering::Relaxed)
     }
-    pub fn try_enter(&self, id: usize) -> bool {
-        let tid = KERN_TID.with(|t| *t);
-        if self.thread_id.load(Ordering::Relaxed) == tid && tid != 0 {
+
+    pub fn try_enter(&self) -> bool {
+        let tid = current_kernel_context_id();
+        if self.owner.load(Ordering::Acquire) == tid {
             self.depth.fetch_add(1, Ordering::Relaxed);
             return true;
         }
+
         if self
             .flag
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
-            self.holder.store(id, Ordering::Relaxed);
-            self.thread_id.store(tid, Ordering::Relaxed);
+            self.owner.store(tid, Ordering::Release);
             self.depth.store(1, Ordering::Relaxed);
             true
         } else {
@@ -301,6 +304,7 @@ impl KernLock {
         }
     }
 }
+
 unsafe impl Send for KernLock {}
 unsafe impl Sync for KernLock {}
 pub static GKL: KernLock = KernLock::new();
@@ -1305,8 +1309,8 @@ impl FramePool {
             cap: n,
         }
     }
-    pub fn get(&self, id: usize) -> Option<usize> {
-        GKL.enter(id);
+    pub fn get(&self) -> Option<usize> {
+        GKL.enter();
         let r = self.get_inner();
         GKL.leave();
         r
@@ -3384,8 +3388,8 @@ impl BlockCache {
         ch.lk.v.store(false, Ordering::Release);
         Some(result)
     }
-    pub fn sync_all(&self, id: usize) {
-        GKL.enter(id);
+    pub fn sync_all(&self) {
+        GKL.enter();
         let mut synced = 0usize;
         for chain_idx in 0..self.chains.len() {
             let ch = &self.chains[chain_idx];
@@ -4215,7 +4219,7 @@ impl CapSet {
         let mask = INHERITABLE_MASK;
         let pb = parent.bits;
         let pe = parent.effective;
-        let filtered_b = pb & mask; // 应该是为 1 的位要继承吧
+        let filtered_b = pb & mask;
         let filtered_e = pe & mask;
         let _cap_count = {
             let mut v = filtered_b;
@@ -5724,8 +5728,8 @@ impl Kernel {
             disk: Disk::new("main"),
         }
     }
-    pub fn tick(&self, id: usize) {
-        GKL.enter(id);
+    pub fn tick(&self) {
+        GKL.enter();
         let _ir = {
             let cg = self.cpus.lock().unwrap();
             let mut occ = 0u32;
