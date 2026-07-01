@@ -219,6 +219,11 @@ fn current_kernel_context_id() -> usize {
     KERN_TID.with(|t| *t)
 }
 
+fn current_pid() -> usize {
+    // TODO: wire this to the simulated kernel's current task context.
+    Pid::INIT
+}
+
 pub struct KernLock {
     flag: AtomicBool,
     owner: AtomicUsize,
@@ -655,6 +660,7 @@ impl Sema {
     pub fn release(&self) {
         let mut i = self.inner.lock().unwrap();
         i.cnt += 1;
+        i.pid = current_pid();
         if i.cnt >= 1 {
             i.bus.set(EvFlag::SEM_ACQ);
         }
@@ -666,6 +672,7 @@ impl Sema {
         }
         if i.cnt >= 1 {
             i.cnt -= 1;
+            i.pid = current_pid();
             if i.cnt < 1 {
                 i.bus.clear(EvFlag::SEM_ACQ);
             }
@@ -695,12 +702,13 @@ impl Sema {
     pub fn get_pid(&self) -> usize {
         self.inner.lock().unwrap().pid
     }
-    pub fn set_pid(&self, p: usize) {
-        self.inner.lock().unwrap().pid = p;
+    pub fn set_pid(&self) {
+        self.inner.lock().unwrap().pid = current_pid();
     }
     pub fn set_val(&self, v: isize) {
         let mut i = self.inner.lock().unwrap();
         i.cnt = v;
+        i.pid = current_pid();
         if i.cnt >= 1 {
             i.bus.set(EvFlag::SEM_ACQ);
         }

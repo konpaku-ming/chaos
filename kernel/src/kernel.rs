@@ -616,6 +616,7 @@ impl SyncQueue {
     }
 }
 
+// 信号量
 struct SemaInner {
     cnt: isize,
     pid: usize,
@@ -702,6 +703,7 @@ impl Sema {
     }
 }
 
+// RAII guard for Semaphor
 impl<'a> Drop for SemaGuard<'a> {
     fn drop(&mut self) {
         self.s.release();
@@ -715,7 +717,8 @@ impl<'a> Deref for SemaGuard<'a> {
 }
 
 pub struct FutexBucket {
-    waiters: Mutex<VecDeque<(usize, thread::Thread, Arc<AtomicBool>)>>,
+    waiters: Mutex<VecDeque<(usize, thread::Thread, Arc<AtomicBool>)>>, 
+    // (addr, thread, awake)
 }
 impl FutexBucket {
     pub fn new() -> Self {
