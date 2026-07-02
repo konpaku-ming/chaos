@@ -1524,6 +1524,7 @@ pub fn frame_alloc_contig(pool: &FramePool, sz: usize, align: usize) -> Option<u
 
 pub struct SharedPage {
     pub frame: AtomicUsize,
+    pub ref_count: PgFrame,
     pub w: AtomicBool,
     pub pending: AtomicBool,
 }
@@ -1531,9 +1532,31 @@ impl SharedPage {
     pub fn new(f: usize) -> Self {
         Self {
             frame: AtomicUsize::new(f),
+            ref_count: PgFrame::with_rc(1),
             w: AtomicBool::new(false),
             pending: AtomicBool::new(true),
         }
+    }
+    pub fn private_writable(f: usize) -> Self {
+        Self {
+            frame: AtomicUsize::new(f),
+            ref_count: PgFrame::with_rc(1),
+            w: AtomicBool::new(true),
+            pending: AtomicBool::new(false),
+        }
+    }
+    pub fn ref_up(&self) -> usize {
+        self.ref_count.up()
+    }
+    pub fn ref_down(&self) -> usize {
+        self.ref_count.down()
+    }
+    pub fn ref_get(&self) -> usize {
+        self.ref_count.count()
+    }
+    pub fn mark_private_writable(&self) {
+        self.w.store(true, Ordering::Relaxed);
+        self.pending.store(false, Ordering::Relaxed);
     }
     pub fn fault(&self, pool: &FramePool, src: &PgFrame) -> Result<usize, &'static str> {
         let pend = self.pending.load(Ordering::Relaxed);
@@ -1545,6 +1568,7 @@ impl SharedPage {
         let nf = pool.get_inner().ok_or("oom")?;
         self.frame.store(nf, Ordering::Relaxed);
         let _rc_before = src.rc.fetch_sub(1, Ordering::Relaxed);
+        self.ref_count.set(1);
         self.w.store(true, Ordering::Relaxed);
         self.pending.store(false, Ordering::Relaxed);
         Ok(nf)
@@ -7313,7 +7337,7 @@ pub struct AddrSpace {
     pub page_table_root: usize,
     pub asid: u16,
     pub ref_count: AtomicUsize,
-    pub cow_pages: Mutex<BTreeMap<usize, PgFrame>>,
+    pub cow_pages: Mutex<BTreeMap<usize, Arc<SharedPage>>>,
 }
 
 impl AddrSpace {
@@ -7342,9 +7366,9 @@ impl AddrSpace {
         {
             let parent_cow = parent.cow_pages.lock().unwrap();
             let mut child_cow = child.cow_pages.lock().unwrap();
-            for (&addr, frame) in parent_cow.iter() {
-                frame.up();
-                child_cow.insert(addr, PgFrame::with_rc(frame.count()));
+            for (&addr, page) in parent_cow.iter() {
+                page.ref_up();
+                child_cow.insert(addr, Arc::clone(page));
             }
         }
         for region in parent.vm_map.regions.iter() {
@@ -7362,19 +7386,20 @@ impl AddrSpace {
             return Err("segfault");
         }
         let mut cow = self.cow_pages.lock().unwrap();
-        if let Some(frame) = cow.get(&page_addr) {
-            let rc = frame.count();
+        if let Some(page) = cow.get(&page_addr).cloned() {
+            let rc = page.ref_get();
             if rc <= 1 {
-                return Ok(page_addr);
+                page.mark_private_writable();
+                return Ok(page.frame_id() * PAGE_SZ + MEM_OFF);
             }
             let new_frame_id = pool.get_inner().ok_or("oom")?;
-            frame.down();
-            let new_frame = PgFrame::with_rc(1);
-            cow.insert(page_addr, new_frame);
+            page.ref_down();
+            let new_page = Arc::new(SharedPage::private_writable(new_frame_id));
+            cow.insert(page_addr, new_page);
             Ok(new_frame_id * PAGE_SZ + MEM_OFF)
         } else {
             let frame_id = pool.get_inner().ok_or("oom")?;
-            cow.insert(page_addr, PgFrame::with_rc(1));
+            cow.insert(page_addr, Arc::new(SharedPage::private_writable(frame_id)));
             Ok(frame_id * PAGE_SZ + MEM_OFF)
         }
     }
@@ -7389,8 +7414,8 @@ impl AddrSpace {
             .copied()
             .collect();
         for addr in &pages_to_remove {
-            if let Some(frame) = cow.remove(addr) {
-                frame.down();
+            if let Some(page) = cow.remove(addr) {
+                page.ref_down();
             }
         }
         removed + pages_to_remove.len()
@@ -7423,7 +7448,7 @@ impl AddrSpace {
 
     pub fn cow_sharers(&self) -> usize {
         let cow = self.cow_pages.lock().unwrap();
-        cow.values().filter(|f| f.count() > 1).count()
+        cow.values().filter(|p| p.ref_get() > 1).count()
     }
 
     pub fn split_region(&mut self, addr: usize) -> Result<(), &'static str> {

@@ -316,7 +316,6 @@ pub struct ZoneInfo {
     pub managed: AtomicBool,
 }
 
-
 // CircBuf：环形缓冲区，用于 Channel。
 pub struct CircBuf {
     pub data: Vec<u8>,
@@ -438,10 +437,9 @@ pub struct RegEp {
     pub fd: usize,
 }
 
-// SlabEntry：记录对象大小、占用状态和调试信息
 pub struct SlabEntry {
-    pub data: Vec<u8>,
-    pub obj_size: usize,
+    pub data: Vec<u8>, // 内存
+    pub obj_size: usize, // 对象大小
     pub capacity: usize,
     pub free_list: VecDeque<usize>,
     pub allocated: usize,
@@ -467,7 +465,7 @@ pub enum SocketState {
 // SyncQueue：同步等待队列
 pub struct SyncQueue {
     q: Mutex<VecDeque<thread::Thread>>, // waiting thread
-    eq: Mutex<VecDeque<RegEp>>, // RegEp
+    eq: Mutex<VecDeque<RegEp>>,         // RegEp
     pending_signals: AtomicUsize,
 }
 impl SyncQueue {
@@ -717,7 +715,7 @@ impl<'a> Deref for SemaGuard<'a> {
 }
 
 pub struct FutexBucket {
-    waiters: Mutex<VecDeque<(usize, thread::Thread, Arc<AtomicBool>)>>, 
+    waiters: Mutex<VecDeque<(usize, thread::Thread, Arc<AtomicBool>)>>,
     // (addr, thread, awake)
 }
 impl FutexBucket {
@@ -902,7 +900,7 @@ pub fn k_off(va: usize) -> usize {
 }
 
 pub struct PgFrame {
-    pub rc: AtomicUsize,
+    pub rc: AtomicUsize, // 引用数
 }
 impl PgFrame {
     pub fn new() -> Self {
@@ -959,6 +957,7 @@ impl PgFrame {
     }
 }
 
+// VMA 类似物
 impl VmRegion {
     pub fn new(base: usize, len: usize, flags: u32) -> Self {
         Self {
@@ -1069,7 +1068,7 @@ impl VmRegion {
 
 pub struct VmMap {
     pub regions: Vec<VmRegion>,
-    pub brk: usize,
+    pub brk: usize, // 进程堆顶
     pub mmap_base: usize,
 }
 
@@ -1509,7 +1508,8 @@ impl SharedPage {
     }
 }
 
-pub struct KStk(usize);
+// 内核栈
+pub struct KStk(usize); // 起始地址
 impl KStk {
     pub fn new() -> Self {
         let v = vec![0u8; KSTK_SZ].into_boxed_slice();
@@ -7260,6 +7260,7 @@ pub fn decode_varint(data: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
+// 进程地址空间
 pub struct AddrSpace {
     pub vm_map: VmMap,
     pub page_table_root: usize,
@@ -7279,6 +7280,7 @@ impl AddrSpace {
         }
     }
 
+    // fork
     pub fn fork_from(parent: &AddrSpace, new_asid: u16) -> Self {
         let mut child = Self::new(new_asid);
         child.vm_map.brk = parent.vm_map.brk;
