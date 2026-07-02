@@ -11,7 +11,7 @@ use std::any::Any;
 use std::cmp::{max, min, Ordering as CmpOrd};
 use std::collections::{BTreeMap, BTreeSet, HashMap, LinkedList, VecDeque};
 use std::fmt;
-use std::ops::{Deref, DerefMut, Index};
+use std::ops::Index;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread;
@@ -631,14 +631,11 @@ struct SemaInner {
     pid: usize,
     rm: bool,
     bus: EvBus,
+    waiters: VecDeque<thread::Thread>,
 }
 
 pub struct Sema {
     inner: Arc<Mutex<SemaInner>>,
-}
-
-pub struct SemaGuard<'a> {
-    s: &'a Sema,
 }
 
 impl Sema {
@@ -649,20 +646,38 @@ impl Sema {
                 rm: false,
                 pid: 0,
                 bus: EvBus::default(),
+                waiters: VecDeque::new(),
             })),
         }
     }
     pub fn remove(&self) {
-        let mut i = self.inner.lock().unwrap();
-        i.rm = true;
-        i.bus.set(EvFlag::SEM_RM);
+        let waiters = {
+            let mut i = self.inner.lock().unwrap();
+            i.rm = true;
+            i.bus.change(EvFlag::SEM_ACQ, EvFlag::SEM_RM);
+            i.waiters.drain(..).collect::<Vec<_>>()
+        };
+        for t in waiters {
+            t.unpark();
+        }
     }
     pub fn release(&self) {
-        let mut i = self.inner.lock().unwrap();
-        i.cnt += 1;
-        i.pid = current_pid();
-        if i.cnt >= 1 {
-            i.bus.set(EvFlag::SEM_ACQ);
+        let waiters = {
+            let mut i = self.inner.lock().unwrap();
+            if i.rm {
+                i.bus.set(EvFlag::SEM_RM);
+                i.waiters.drain(..).collect::<Vec<_>>()
+            } else {
+                i.cnt += 1;
+                i.pid = current_pid();
+                if i.cnt >= 1 {
+                    i.bus.set(EvFlag::SEM_ACQ);
+                }
+                i.waiters.pop_front().into_iter().collect::<Vec<_>>()
+            }
+        };
+        for t in waiters {
+            t.unpark();
         }
     }
     pub fn try_acquire(&self) -> Result<bool, &'static str> {
@@ -681,23 +696,37 @@ impl Sema {
             Ok(false)
         }
     }
-    pub fn acquire_spin(&self) -> Result<(), &'static str> {
+    pub fn acquire(&self) -> Result<(), &'static str> {
+        let th = thread::current();
+        let tid = th.id();
         loop {
-            match self.try_acquire()? {
-                true => return Ok(()),
-                false => thread::yield_now(),
+            {
+                let mut i = self.inner.lock().unwrap();
+                if i.rm {
+                    i.waiters.retain(|t| t.id() != tid);
+                    return Err("removed");
+                }
+                if i.cnt >= 1 {
+                    i.waiters.retain(|t| t.id() != tid);
+                    i.cnt -= 1;
+                    i.pid = current_pid();
+                    if i.cnt < 1 {
+                        i.bus.clear(EvFlag::SEM_ACQ);
+                    }
+                    return Ok(());
+                }
+                if !i.waiters.iter().any(|t| t.id() == tid) {
+                    i.waiters.push_back(th.clone());
+                }
             }
+            thread::park();
         }
-    }
-    pub fn access(&self) -> Result<SemaGuard<'_>, &'static str> {
-        self.acquire_spin()?;
-        Ok(SemaGuard { s: self })
     }
     pub fn get_val(&self) -> isize {
         self.inner.lock().unwrap().cnt
     }
     pub fn get_ncnt(&self) -> usize {
-        self.inner.lock().unwrap().bus.cb_len()
+        self.inner.lock().unwrap().waiters.len()
     }
     pub fn get_pid(&self) -> usize {
         self.inner.lock().unwrap().pid
@@ -706,24 +735,33 @@ impl Sema {
         self.inner.lock().unwrap().pid = current_pid();
     }
     pub fn set_val(&self, v: isize) {
-        let mut i = self.inner.lock().unwrap();
-        i.cnt = v;
-        i.pid = current_pid();
-        if i.cnt >= 1 {
-            i.bus.set(EvFlag::SEM_ACQ);
+        let waiters = {
+            let mut i = self.inner.lock().unwrap();
+            if i.rm {
+                i.bus.set(EvFlag::SEM_RM);
+                i.waiters.drain(..).collect::<Vec<_>>()
+            } else {
+                i.cnt = v;
+                i.pid = current_pid();
+                if i.cnt >= 1 {
+                    i.bus.set(EvFlag::SEM_ACQ);
+                    let n = min(i.cnt as usize, i.waiters.len());
+                    let mut waiters = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        if let Some(t) = i.waiters.pop_front() {
+                            waiters.push(t);
+                        }
+                    }
+                    waiters
+                } else {
+                    i.bus.clear(EvFlag::SEM_ACQ);
+                    Vec::new()
+                }
+            }
+        };
+        for t in waiters {
+            t.unpark();
         }
-    }
-}
-
-impl<'a> Drop for SemaGuard<'a> {
-    fn drop(&mut self) {
-        self.s.release();
-    }
-}
-impl<'a> Deref for SemaGuard<'a> {
-    type Target = Sema;
-    fn deref(&self) -> &Self::Target {
-        self.s
     }
 }
 
