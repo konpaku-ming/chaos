@@ -1,3 +1,9 @@
+// 本文件是 kernel/src/kernel.rs 的中文注释阅读版。
+//
+// 生成目的：帮助读者快速理解每个结构体、函数/方法和全局常量的含义。
+// 原始可编译文件仍然是 kernel/src/kernel.rs；本文件放在 docs/ 下，仅用于阅读，不参与测试编译。
+// 注释策略：为每个 struct、函数/方法和 pub const 全局常量添加简短中文说明。
+//
 #![allow(
     unused,
     dead_code,
@@ -17,164 +23,209 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread;
 use std::time::Duration;
 
-pub const PAGE_SZ: usize = 4096;
-pub const N_PROC: usize = 256;
-pub const N_FRAMES: usize = 65536;
-pub const KERN_BASE: usize = 0xFFFF_FFFF_8000_0000;
-pub const PHYS_OFF: usize = 0xFFFF_FFFF_0000_0000;
-pub const MEM_OFF: usize = 0x8000_0000;
-pub const KHEAP_SZ: usize = 0x800000;
-pub const N_CHAINS: usize = 64;
-pub const RBUF_CAP: usize = 256;
-pub const N_REGS: usize = 16;
-pub const MNT_DEPTH: usize = 8;
-pub const MAX_CPU: usize = 8;
-pub const KSTK_SZ: usize = 0x4000;
-pub const USR_STK_OFF: usize = 0x7FFF_0000;
-pub const USR_STK_SZ: usize = 0x10000;
-pub const USEC_TICK: usize = 1000;
-pub const FOLLOW_LIM: usize = 3;
+// ==========================================
+// 1. 内存与基础系统限制
+// ==========================================
+pub const PAGE_SZ: usize = 4096;           // 页面大小 (4KB)。用于 SYS_MMAP, SYS_BRK, SYS_READ/WRITE 的页对齐计算、缓存分页。
+pub const N_PROC: usize = 256;             // 系统最大进程数。用于限制 SYS_FORK, SYS_PIPE (限制 fd 数量), SYS_CLOSE/DUP 的边界检查 (fd < N_PROC * 4)。
+pub const N_FRAMES: usize = 65536;         // 物理内存总页帧数 (65536 * 4KB = 256MB)。用于物理页帧分配器 (self.pool) 和 SYS_FORK 的内存压力检查。
+pub const KERN_BASE: usize = 0xFFFF_FFFF_8000_0000; // 内核虚拟地址基址 (x86-64 高半区)。用于 SYS_BRK 和 SYS_MMAP 防止用户内存越界覆盖内核空间。
+pub const PHYS_OFF: usize = 0xFFFF_FFFF_0000_0000;  // 物理内存直接映射区的偏移量。内核用于将物理地址转换为内核虚拟地址。
+pub const MEM_OFF: usize = 0x8000_0000;    // 用户态内存或 legacy 内存偏移基址。
+pub const KHEAP_SZ: usize = 0x800000;      // 内核堆大小 (8MB)。用于内核内部的 Slab 分配器或 kmalloc。
+pub const N_CHAINS: usize = 64;            // 哈希链表桶数量。用于文件缓存结构 self.cache.width，在 SYS_OPEN/READ/WRITE/CLOSE 中通过 fd % width 定位缓存链。
+pub const RBUF_CAP: usize = 256;           // 环形缓冲区容量。用于管道 或 TTY 设备的读写缓冲区。
+pub const N_REGS: usize = 16;              // CPU 通用寄存器数量。用于 Trap 上下文 结构体，保存/恢复用户态寄存器现场。
+pub const MNT_DEPTH: usize = 8;            // 挂载表最大深度。用于 SYS_OPEN 解析路径时的挂载点匹配 (self.mnt.entries)。
+pub const MAX_CPU: usize = 8;              // 最大 CPU 核心数。用于 self.cpus 数组初始化及调度器 per-CPU 变量。
+pub const KSTK_SZ: usize = 0x4000;         // 内核栈大小 (16KB)。每个进程在内核态执行 syscall 时的独立栈空间。
+pub const USR_STK_OFF: usize = 0x7FFF_0000; // 用户态栈顶初始偏移。用于 SYS_EXEC 初始化新进程时的栈基址设定。
+pub const USR_STK_SZ: usize = 0x10000;     // 用户态栈大小 (64KB)。
+pub const USEC_TICK: usize = 1000;         // 时钟微秒级滴答。用于全局时钟 CLK 的推进和时间戳计算。
+pub const FOLLOW_LIM: usize = 3;           // 符号链接跟随最大深度。用于 SYS_OPEN 解析路径时的防死循环保护。
 
-pub const F_DUPFD: usize = 0;
-pub const F_GETFD: usize = 1;
-pub const F_SETFD: usize = 2;
-pub const F_GETFL: usize = 3;
-pub const F_SETFL: usize = 4;
-pub const F_GETLK: usize = 5;
-pub const F_SETLK: usize = 6;
-pub const F_SETLKW: usize = 7;
-pub const FD_CLOEXEC: usize = 1;
-pub const F_DUPFD_CLOEXEC: usize = 1030;
-pub const O_NONBLOCK: usize = 0o4000;
-pub const O_APPEND: usize = 0o2000;
-pub const O_CLOEXEC: usize = 0o2000000;
-pub const AT_NOFOLLOW: usize = 0x100;
+// ==========================================
+// 2. 文件描述符与 Open/Fcntl 标志位
+// ==========================================
+pub const F_DUPFD: usize = 0;              // fcntl 命令：复制文件描述符，寻找 >= arg 的最小可用 fd。用于 SYS_FCNTL。
+pub const F_GETFD: usize = 1;              // fcntl 命令：获取 close-on-exec 标志。用于 SYS_FCNTL。
+pub const F_SETFD: usize = 2;              // fcntl 命令：设置 close-on-exec 标志。用于 SYS_FCNTL。
+pub const F_GETFL: usize = 3;              // fcntl 命令：获取文件访问状态标志 (如 O_NONBLOCK)。用于 SYS_FCNTL。
+pub const F_SETFL: usize = 4;              // fcntl 命令：设置文件访问状态标志。用于 SYS_FCNTL。
+pub const F_GETLK: usize = 5;              // fcntl 命令：获取文件锁。用于 SYS_FCNTL。
+pub const F_SETLK: usize = 6;              // fcntl 命令：设置文件锁 (非阻塞)。用于 SYS_FCNTL。
+pub const F_SETLKW: usize = 7;             // fcntl 命令：设置文件锁 (阻塞)。用于 SYS_FCNTL。
+pub const FD_CLOEXEC: usize = 1;           // close-on-exec 标志位的具体值。用于 SYS_FCNTL 的 F_GETFD/F_SETFD 判断。
+pub const F_DUPFD_CLOEXEC: usize = 1030;   // fcntl 命令：复制 fd 并设置 close-on-exec。用于 SYS_FCNTL。
+pub const O_NONBLOCK: usize = 0o4000;      // open/fcntl 标志：非阻塞 I/O。用于 SYS_OPEN 和 SYS_PIPE 的 flags 解析。
+pub const O_APPEND: usize = 0o2000;        // open/fcntl 标志：每次写操作前将文件指针移到末尾。用于 SYS_OPEN 和 F_GETFL/F_SETFL。
+pub const O_CLOEXEC: usize = 0o2000000;    // open 标志：执行 exec 时自动关闭 fd。用于 SYS_OPEN 和 SYS_PIPE。
+pub const AT_NOFOLLOW: usize = 0x100;      // open 标志：不解析符号链接。用于 SYS_OPEN 的 _follow_sym 逻辑。
 
-pub const TCGETS: usize = 0x5401;
-pub const TCSETS: usize = 0x5402;
-pub const TIOCGPGRP: usize = 0x540F;
-pub const TIOCSPGRP: usize = 0x5410;
-pub const TIOCGWINSZ: usize = 0x5413;
-pub const FIONCLEX: usize = 0x5450;
-pub const FIOCLEX: usize = 0x5451;
-pub const FIONBIO: usize = 0x5421;
+// ==========================================
+// 3. 终端 IOCTL 命令
+// ==========================================
+pub const TCGETS: usize = 0x5401;          // ioctl 命令：获取终端属性。用于 SYS_IOCTL 校验 TrmIO 结构体大小。
+pub const TCSETS: usize = 0x5402;          // ioctl 命令：设置终端属性。用于 SYS_IOCTL 校验。
+pub const TIOCGPGRP: usize = 0x540F;       // ioctl 命令：获取前台进程组 ID。用于 SYS_IOCTL。
+pub const TIOCSPGRP: usize = 0x5410;       // ioctl 命令：设置前台进程组 ID。用于 SYS_IOCTL。
+pub const TIOCGWINSZ: usize = 0x5413;      // ioctl 命令：获取终端窗口大小。用于 SYS_IOCTL 校验 WinSz 结构体。
+pub const FIONCLEX: usize = 0x5450;        // ioctl 命令：清除 close-on-exec 标志。用于 SYS_IOCTL。
+pub const FIOCLEX: usize = 0x5451;         // ioctl 命令：设置 close-on-exec 标志。用于 SYS_IOCTL。
+pub const FIONBIO: usize = 0x5421;         // ioctl 命令：设置/清除非阻塞 I/O 模式。用于 SYS_IOCTL。
 
-pub const AT_PHDR: u8 = 3;
-pub const AT_PHENT: u8 = 4;
-pub const AT_PHNUM: u8 = 5;
-pub const AT_PAGESZ: u8 = 6;
-pub const AT_BASE: u8 = 7;
-pub const AT_ENTRY: u8 = 9;
+// ==========================================
+// 4. ELF 辅助向量
+// ==========================================
+pub const AT_PHDR: u8 = 3;                 // 辅助向量：程序头表地址。用于 SYS_EXEC 构造新进程栈底信息传给动态链接器。
+pub const AT_PHENT: u8 = 4;                // 辅助向量：程序头条目大小。用于 SYS_EXEC。
+pub const AT_PHNUM: u8 = 5;                // 辅助向量：程序头条目数量。用于 SYS_EXEC。
+pub const AT_PAGESZ: u8 = 6;               // 辅助向量：系统页大小。用于 SYS_EXEC。
+pub const AT_BASE: u8 = 7;                 // 辅助向量：解释器 (ld.so) 基址。用于 SYS_EXEC。
+pub const AT_ENTRY: u8 = 9;                // 辅助向量：程序入口点地址。用于 SYS_EXEC。
 
-pub const LM_ISIG: u32 = 0o000001;
-pub const LM_ICANON: u32 = 0o000002;
-pub const LM_ECHO: u32 = 0o000010;
-pub const LM_ECHOE: u32 = 0o000020;
-pub const LM_ECHOK: u32 = 0o000040;
-pub const LM_ECHONL: u32 = 0o000100;
-pub const LM_NOFLSH: u32 = 0o000200;
-pub const LM_TOSTOP: u32 = 0o000400;
-pub const LM_IEXTEN: u32 = 0o100000;
-pub const LM_XCASE: u32 = 0o000004;
-pub const LM_ECHOCTL: u32 = 0o001000;
-pub const LM_ECHOPRT: u32 = 0o002000;
-pub const LM_ECHOKE: u32 = 0o004000;
-pub const LM_FLUSHO: u32 = 0o010000;
-pub const LM_PENDIN: u32 = 0o040000;
-pub const LM_EXTPROC: u32 = 0o200000;
+// ==========================================
+// 5. 终端线路规范 标志位
+// ==========================================
+pub const LM_ISIG: u32 = 0o000001;         // termios c_lflag：产生信号 (如 Ctrl+C 产生 SIGINT)。用于 TrmIO 结构体。
+pub const LM_ICANON: u32 = 0o000002;       // termios c_lflag：规范模式 (行缓冲)。
+pub const LM_ECHO: u32 = 0o000010;         // termios c_lflag：回显输入字符。
+pub const LM_ECHOE: u32 = 0o000020;        // termios c_lflag：擦除时回显退格。
+pub const LM_ECHOK: u32 = 0o000040;        // termios c_lflag：Kill 行时回显换行。
+pub const LM_ECHONL: u32 = 0o000100;       // termios c_lflag：回显 NL 即使没有 ECHO。
+pub const LM_NOFLSH: u32 = 0o000200;       // termios c_lflag：中断时不刷新输入输出队列。
+pub const LM_TOSTOP: u32 = 0o000400;       // termios c_lflag：后台写操作发送 SIGTTOU。
+pub const LM_IEXTEN: u32 = 0o100000;       // termios c_lflag：启用实现自定义的输入处理。
+pub const LM_XCASE: u32 = 0o000004;        // termios c_lflag：大小写映射 (已废弃)。
+pub const LM_ECHOCTL: u32 = 0o001000;      // termios c_lflag：回显控制字符为 ^X。
+pub const LM_ECHOPRT: u32 = 0o002000;      // termios c_lflag：硬拷贝擦除模式。
+pub const LM_ECHOKE: u32 = 0o004000;       // termios c_lflag：Kill 行时执行擦除操作。
+pub const LM_FLUSHO: u32 = 0o010000;       // termios c_lflag：输出被刷新。
+pub const LM_PENDIN: u32 = 0o040000;       // termios c_lflag：输入挂起 (下次读时重新处理)。
+pub const LM_EXTPROC: u32 = 0o200000;      // termios c_lflag：外部处理模式 (旁路 termios)。
 
-pub const VM_READ: u32 = 0x01;
-pub const VM_WRITE: u32 = 0x02;
-pub const VM_EXEC: u32 = 0x04;
-pub const VM_SHARED: u32 = 0x08;
-pub const VM_GROWSDOWN: u32 = 0x10;
-pub const VM_DONTCOPY: u32 = 0x20;
-pub const VM_HUGETLB: u32 = 0x40;
-pub const VM_PFNMAP: u32 = 0x80;
+// ==========================================
+// 6. 虚拟内存区域 (VMA) 标志位
+// ==========================================
+pub const VM_READ: u32 = 0x01;             // VMA 权限：可读。用于 SYS_MMAP 转换 prot 参数。
+pub const VM_WRITE: u32 = 0x02;            // VMA 权限：可写。用于 SYS_MMAP 转换 prot 参数。
+pub const VM_EXEC: u32 = 0x04;             // VMA 权限：可执行。用于 SYS_MMAP 转换 prot 参数。
+pub const VM_SHARED: u32 = 0x08;           // VMA 属性：共享映射。用于 SYS_MMAP 判断 MAP_SHARED。
+pub const VM_GROWSDOWN: u32 = 0x10;        // VMA 属性：向下生长 (如用户栈)。
+pub const VM_DONTCOPY: u32 = 0x20;         // VMA 属性：fork 时不复制 (如内核专属区)。
+pub const VM_HUGETLB: u32 = 0x40;          // VMA 属性：使用大页。
+pub const VM_PFNMAP: u32 = 0x80;           // VMA 属性：页帧映射 (如设备内存映射)。
 
-pub const CAP_CHOWN: u32 = 0;
-pub const CAP_KILL: u32 = 5;
-pub const CAP_SETUID: u32 = 7;
-pub const CAP_SETGID: u32 = 6;
-pub const CAP_NET_BIND: u32 = 10;
-pub const CAP_NET_RAW: u32 = 13;
-pub const CAP_SYS_ADMIN: u32 = 21;
-pub const CAP_SYS_PTRACE: u32 = 19;
-pub const INHERITABLE_MASK: u64 = 0x0000_00FF_FFFF_FFFF;
+// ==========================================
+// 7. Linux Capabilities (特权能力)
+// ==========================================
+pub const CAP_CHOWN: u32 = 0;              // 允许改变文件所有者。用于 SYS_OPEN 等权限检查。
+pub const CAP_KILL: u32 = 5;               // 允许向不属于自己用户的进程发信号。用于 SYS_KILL。
+pub const CAP_SETUID: u32 = 7;             // 允许设置进程 UID。
+pub const CAP_SETGID: u32 = 6;             // 允许设置进程 GID。
+pub const CAP_NET_BIND: u32 = 10;          // 允许绑定 1024 以下端口。
+pub const CAP_NET_RAW: u32 = 13;           // 允许使用原始套接字。
+pub const CAP_SYS_ADMIN: u32 = 21;         // 超级管理员权限 (mount, 设置hostname等)。
+pub const CAP_SYS_PTRACE: u32 = 19;        // 允许 ptrace 其他进程。
+pub const INHERITABLE_MASK: u64 = 0x0000_00FF_FFFF_FFFF; // 可继承的能力位掩码，用于 SYS_FORK。
 
-pub const ZONE_DMA: usize = 0;
-pub const ZONE_NORMAL: usize = 1;
-pub const ZONE_HIGH: usize = 2;
-pub const N_ZONES: usize = 3;
+// ==========================================
+// 8. 物理内存分区
+// ==========================================
+pub const ZONE_DMA: usize = 0;             // DMA 内存区 (<16MB)，供老式 ISA 设备使用。用于 self.pool 分区分配。
+pub const ZONE_NORMAL: usize = 1;          // 正常内存区，内核和用户态主要使用区。
+pub const ZONE_HIGH: usize = 2;            // 高端内存区 (32位系统特有，大于 1GB 物理内存部分)。
+pub const N_ZONES: usize = 3;              // 内存区数量。
 
-pub const PRIO_MIN: i32 = -20;
-pub const PRIO_MAX: i32 = 19;
-pub const PRIO_DEFAULT: i32 = 0;
-pub const SCHED_NORMAL: u8 = 0;
-pub const SCHED_FIFO: u8 = 1;
-pub const SCHED_RR: u8 = 2;
-pub const SCHED_BATCH: u8 = 3;
+// ==========================================
+// 9. 进程调度
+// ==========================================
+pub const PRIO_MIN: i32 = -20;             // 进程优先级最小值 (最高优先级)。用于 Task 优先级计算。
+pub const PRIO_MAX: i32 = 19;              // 进程优先级最大值 (最低优先级)。
+pub const PRIO_DEFAULT: i32 = 0;           // 默认优先级。
+pub const SCHED_NORMAL: u8 = 0;            // 调度策略：普通时间片轮转。
+pub const SCHED_FIFO: u8 = 1;              // 调度策略：实时先进先出。
+pub const SCHED_RR: u8 = 2;                // 调度策略：实时时间片轮转。
+pub const SCHED_BATCH: u8 = 3;             // 调度策略：批处理模式。
 
-pub const SLAB_OBJ_MIN: usize = 8;
-pub const SLAB_OBJ_MAX: usize = 2048;
-pub const SLAB_ALIGN: usize = 8;
+// ==========================================
+// 10. 内核 Slab 分配器
+// ==========================================
+pub const SLAB_OBJ_MIN: usize = 8;         // Slab 分配器最小对象大小 (8字节)。
+pub const SLAB_OBJ_MAX: usize = 2048;      // Slab 分配器最大对象大小 (2KB)。
+pub const SLAB_ALIGN: usize = 8;           // Slab 对象对齐字节数。
 
-pub const NSIG: u32 = 64;
-pub const SIG_DFL: usize = 0;
-pub const SIG_IGN: usize = 1;
-pub const SIGKILL: u32 = 9;
-pub const SIGSTOP: u32 = 19;
-pub const SIGCHLD: u32 = 17;
-pub const SIGUSR1: u32 = 10;
-pub const SIGUSR2: u32 = 12;
-pub const SIGALRM: u32 = 14;
+// ==========================================
+// 11. 信号
+// ==========================================
+pub const NSIG: u32 = 64;                  // 最大信号数。用于 SYS_KILL 验证 sig <= NSIG。
+pub const SIG_DFL: usize = 0;              // 默认信号处理函数。用于 SYS_SIGACTION 未设置时的处理。
+pub const SIG_IGN: usize = 1;              // 忽略信号的处理函数。
+pub const SIGKILL: u32 = 9;                // 强制终止进程信号。用于 SYS_KILL 的特殊检查 (不允许发给 PID<=1)。
+pub const SIGSTOP: u32 = 19;               // 暂停进程信号。用于 SYS_KILL 的特殊检查。
+pub const SIGCHLD: u32 = 17;               // 子进程状态改变信号。用于 SYS_EXIT 通知父进程。
+pub const SIGUSR1: u32 = 10;               // 用户自定义信号 1。
+pub const SIGUSR2: u32 = 12;               // 用户自定义信号 2。
+pub const SIGALRM: u32 = 14;               // 定时器超时信号。
 
-pub const TIMER_WHEEL_SIZE: usize = 256;
-pub const TIMER_TICK_HZ: usize = 100;
+// ==========================================
+// 12. 定时器
+// ==========================================
+pub const TIMER_WHEEL_SIZE: usize = 256;   // 定时器轮大小。用于内核定时器管理结构。
+pub const TIMER_TICK_HZ: usize = 100;      // 时钟中断频率 (100Hz，每 10ms 一次)。
 
-pub const SOCK_STREAM: u32 = 1;
-pub const SOCK_DGRAM: u32 = 2;
-pub const SOCK_RAW: u32 = 3;
-pub const AF_INET: u32 = 2;
-pub const AF_INET6: u32 = 10;
-pub const AF_UNIX: u32 = 1;
+// ==========================================
+// 13. 网络套接字
+// ==========================================
+pub const SOCK_STREAM: u32 = 1;            // TCP 流式套接字。用于 socket 相关 syscall (本模拟器中未展开实现)。
+pub const SOCK_DGRAM: u32 = 2;             // UDP 数据报套接字。
+pub const SOCK_RAW: u32 = 3;               // 原始套接字。
+pub const AF_INET: u32 = 2;                // IPv4 地址族。
+pub const AF_INET6: u32 = 10;              // IPv6 地址族。
+pub const AF_UNIX: u32 = 1;                // Unix 域套接字 (本地进程通信)。
 
-pub const SYS_READ: usize = 0;
-pub const SYS_WRITE: usize = 1;
-pub const SYS_OPEN: usize = 2;
-pub const SYS_CLOSE: usize = 3;
-pub const SYS_STAT: usize = 4;
-pub const SYS_FSTAT: usize = 5;
-pub const SYS_MMAP: usize = 9;
-pub const SYS_MUNMAP: usize = 11;
-pub const SYS_BRK: usize = 12;
-pub const SYS_IOCTL: usize = 16;
-pub const SYS_PIPE: usize = 22;
-pub const SYS_DUP: usize = 32;
-pub const SYS_DUP2: usize = 33;
-pub const SYS_FORK: usize = 57;
-pub const SYS_EXEC: usize = 59;
-pub const SYS_EXIT: usize = 60;
-pub const SYS_WAIT4: usize = 61;
-pub const SYS_KILL: usize = 62;
-pub const SYS_FCNTL: usize = 72;
-pub const SYS_GETPID: usize = 39;
-pub const SYS_GETPPID: usize = 110;
-pub const SYS_SETPGID: usize = 109;
-pub const SYS_GETPGID: usize = 121;
-pub const SYS_SETSID: usize = 112;
-pub const SYS_EPOLL_CREATE: usize = 213;
-pub const SYS_EPOLL_CTL: usize = 233;
-pub const SYS_EPOLL_WAIT: usize = 232;
-pub const SYS_CLOCK_GETTIME: usize = 228;
-pub const SYS_SIGACTION: usize = 13;
-pub const SYS_SIGPROCMASK: usize = 14;
-pub const SYS_FUTEX: usize = 202;
+// ==========================================
+// 14. 系统调用号 (x86_64 Linux 标准)
+// ==========================================
+pub const SYS_READ: usize = 0;             // 读文件。用于 dispatch_syscall 的 match 分发。
+pub const SYS_WRITE: usize = 1;            // 写文件。用于 dispatch_syscall 的 match 分发。
+pub const SYS_OPEN: usize = 2;             // 打开文件。用于 dispatch_syscall。
+pub const SYS_CLOSE: usize = 3;            // 关闭文件描述符。用于 dispatch_syscall。
+pub const SYS_STAT: usize = 4;             // 获取文件状态 (通过路径)。用于 dispatch_syscall。
+pub const SYS_FSTAT: usize = 5;            // 获取文件状态 (通过 fd)。用于 dispatch_syscall。
+pub const SYS_MMAP: usize = 9;             // 内存映射。用于 dispatch_syscall。
+pub const SYS_MUNMAP: usize = 11;          // 解除内存映射。用于 dispatch_syscall。
+pub const SYS_BRK: usize = 12;             // 调整堆空间大小。用于 dispatch_syscall。
+pub const SYS_IOCTL: usize = 16;           // 设备控制。用于 dispatch_syscall。
+pub const SYS_PIPE: usize = 22;            // 创建管道。用于 dispatch_syscall。
+pub const SYS_DUP: usize = 32;             // 复制文件描述符 (最小可用)。用于 dispatch_syscall。
+pub const SYS_DUP2: usize = 33;            // 复制文件描述符 (指定目标)。用于 dispatch_syscall。
+pub const SYS_FORK: usize = 57;            // 创建子进程。用于 dispatch_syscall。
+pub const SYS_EXEC: usize = 59;            // 执行新程序。用于 dispatch_syscall。
+pub const SYS_EXIT: usize = 60;            // 退出进程。用于 dispatch_syscall。
+pub const SYS_WAIT4: usize = 61;           // 等待子进程状态改变。用于 dispatch_syscall。
+pub const SYS_KILL: usize = 62;            // 发送信号。用于 dispatch_syscall。
+pub const SYS_FCNTL: usize = 72;           // 文件描述符控制。用于 dispatch_syscall。
+pub const SYS_GETPID: usize = 39;          // 获取进程 PID。用于 dispatch_syscall。
+pub const SYS_GETPPID: usize = 110;        // 获取父进程 PID。用于 dispatch_syscall。
+pub const SYS_SETPGID: usize = 109;        // 设置进程组 ID。用于 dispatch_syscall。
+pub const SYS_GETPGID: usize = 121;        // 获取进程组 ID。
+pub const SYS_SETSID: usize = 112;         // 创建新会话。
+pub const SYS_EPOLL_CREATE: usize = 213;   // 创建 epoll 实例 (I/O多路复用)。
+pub const SYS_EPOLL_CTL: usize = 233;      // 操作 epoll 实例 (添加/修改/删除 fd)。
+pub const SYS_EPOLL_WAIT: usize = 232;     // 等待 epoll 事件。
+pub const SYS_CLOCK_GETTIME: usize = 228;  // 获取高精度时间。
+pub const SYS_SIGACTION: usize = 13;       // 设置信号处理函数。
+pub const SYS_SIGPROCMASK: usize = 14;     // 设置信号屏蔽字。
+pub const SYS_FUTEX: usize = 202;          // 快速用户态互斥锁 (用于自旋锁和条件变量的内核态睡眠唤醒)。
 
-pub const BOOT_EPOCH: usize = 0;
+// ==========================================
+// 15. 杂项
+// ==========================================
+pub const BOOT_EPOCH: usize = 0;           // 启动时间纪元 (0 代表从 0 秒开始)。用于 CLK 全局时钟初始化。
+pub const IOQUEUE_DEPTH: usize = 128;      // I/O 队列深度 (异步 I/O 如 io_uring 使用的环形队列大小)。用于 self.disk 结构。
 
-pub const IOQUEUE_DEPTH: usize = 128;
-
+/// 虚拟内存区域。
 pub struct VmRegion {
     pub base: usize,
     pub len: usize,
@@ -184,24 +235,28 @@ pub struct VmRegion {
     pub ref_count: AtomicUsize,
 }
 
+/// Linux capability 权限集合。
 pub struct CapSet {
     pub bits: u64,
     pub effective: u64,
     pub ambient: u64,
 }
 
+/// 单个信号的处理动作。
 pub struct SigAction {
     pub handler: usize,
     pub flags: u32,
     pub mask: u64,
 }
 
+/// 信号 pending/blocked/动作表。
 pub struct SigSet {
     pub pending: u64,
     pub blocked: u64,
     pub actions: Vec<SigAction>,
 }
 
+/// 定时器条目。
 pub struct TimerEntry {
     pub deadline: usize,
     pub interval: usize,
@@ -217,6 +272,7 @@ thread_local! {
 static NEXT_KERN_TID: AtomicUsize = AtomicUsize::new(1);
 
 // human
+/// 全局内核锁。
 pub struct KernLock {
     flag: AtomicBool,
     holder: AtomicUsize,
@@ -224,6 +280,7 @@ pub struct KernLock {
     thread_id: AtomicUsize,
 }
 impl KernLock {
+// 常量 fn: 常量 fn。
     pub const fn new() -> Self {
         Self {
             flag: AtomicBool::new(false),
@@ -232,6 +289,7 @@ impl KernLock {
             thread_id: AtomicUsize::new(0),
         }
     }
+    /// 进入临界区/获取锁。
     pub fn enter(&self, id: usize) {
         // 为什么可以乱传 id 进来
         let tid = KERN_TID.with(|t| *t);
@@ -250,6 +308,7 @@ impl KernLock {
         self.thread_id.store(tid, Ordering::Relaxed);
         self.depth.store(1, Ordering::Relaxed);
     }
+    /// 离开临界区/释放锁。
     pub fn leave(&self) {
         let tid = KERN_TID.with(|t| *t);
         assert!(
@@ -272,15 +331,19 @@ impl KernLock {
         self.depth.store(0, Ordering::Relaxed);
         self.flag.store(false, Ordering::Release);
     }
+    /// 判断是否被持有。
     pub fn held(&self) -> bool {
         self.flag.load(Ordering::Relaxed)
     }
+    /// 返回持有者。
     pub fn owner(&self) -> usize {
         self.holder.load(Ordering::Relaxed)
     }
+    /// 返回递归深度。
     pub fn level(&self) -> usize {
         self.depth.load(Ordering::Relaxed)
     }
+    /// 尝试enter。
     pub fn try_enter(&self, id: usize) -> bool {
         let tid = KERN_TID.with(|t| *t);
         if self.thread_id.load(Ordering::Relaxed) == tid && tid != 0 {
@@ -306,6 +369,7 @@ unsafe impl Sync for KernLock {}
 pub static GKL: KernLock = KernLock::new();
 
 // ZoneInfo：记录某个内存 zone 的容量、水位线和空闲页帧情况。
+/// 内存 zone 信息。
 pub struct ZoneInfo {
     pub zone_id: usize,
     pub base_pfn: usize,
@@ -317,6 +381,7 @@ pub struct ZoneInfo {
 }
 
 // CircBuf：环形缓冲区，用于 Channel。
+/// 环形缓冲区。
 pub struct CircBuf {
     pub data: Vec<u8>,
     pub rd: usize,
@@ -326,15 +391,18 @@ pub struct CircBuf {
 }
 
 // Spin：自旋锁
+/// 自旋锁。
 pub struct Spin {
     v: AtomicBool,
 }
 impl Spin {
+// 常量 fn: 常量 fn。
     pub const fn new() -> Self {
         Self {
             v: AtomicBool::new(false),
         }
     }
+    /// 获取锁。
     pub fn acquire(&self) {
         while self
             .v
@@ -344,15 +412,18 @@ impl Spin {
             core::hint::spin_loop();
         }
     }
+    /// 尝试获取锁。
     pub fn try_acquire(&self) -> bool {
         self.v
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
     }
     // 没有检查持有
+    /// 释放锁。
     pub fn release(&self) {
         self.v.store(false, Ordering::Release);
     }
+    /// 判断是否被持有。
     pub fn is_held(&self) -> bool {
         self.v.load(Ordering::Relaxed)
     }
@@ -361,27 +432,40 @@ unsafe impl Send for Spin {}
 unsafe impl Sync for Spin {}
 
 // ???
+/// 占位式 RAII guard。
 pub struct FlgGuard(usize);
 impl FlgGuard {
+    /// 进入临界区/获取锁。
     pub fn enter() -> Self {
         Self(0)
     }
 }
 impl Drop for FlgGuard {
+    /// 销毁时执行清理。
     fn drop(&mut self) {}
 }
 
 // EvFlag：事件标志位集合
+/// 事件标志位集合。
 pub struct EvFlag;
 impl EvFlag {
+// 常量 READABLE: 常量 READABLE。
     pub const READABLE: u32 = 1 << 0;
+// 常量 WRITABLE: 常量 WRITABLE。
     pub const WRITABLE: u32 = 1 << 1;
+// 常量 ERROR: 常量 ERROR。
     pub const ERROR: u32 = 1 << 2;
+// 常量 CLOSED: 常量 CLOSED。
     pub const CLOSED: u32 = 1 << 3;
+// 常量 PROC_QUIT: 常量 PROC_QUIT。
     pub const PROC_QUIT: u32 = 1 << 10;
+// 常量 CHILD_QUIT: 常量 CHILD_QUIT。
     pub const CHILD_QUIT: u32 = 1 << 11;
+// 常量 RECV_SIG: 常量 RECV_SIG。
     pub const RECV_SIG: u32 = 1 << 12;
+// 常量 SEM_RM: 常量 SEM_RM。
     pub const SEM_RM: u32 = 1 << 20;
+// 常量 SEM_ACQ: 常量 SEM_ACQ。
     pub const SEM_ACQ: u32 = 1 << 21;
 }
 
@@ -389,20 +473,25 @@ pub type EvCb = Box<dyn Fn(u32) -> bool + Send>;
 
 // EvBus：当前事件状态 & callback 列表
 #[derive(Default)]
+/// 事件总线。
 pub struct EvBus {
     pub ev: u32,
     pub cbs: Vec<Box<dyn Fn(u32) -> bool + Send>>,
 }
 impl EvBus {
+    /// 创建并返回实例。
     pub fn make() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self::default()))
     }
+    /// 设置指定项。
     pub fn set(&mut self, s: u32) {
         self.change(0, s);
     }
+    /// 清空状态。
     pub fn clear(&mut self, s: u32) {
         self.change(s, 0);
     }
+    /// 改变事件位。
     pub fn change(&mut self, rst: u32, s: u32) {
         let orig = self.ev;
         self.ev = (self.ev & !rst) | s;
@@ -410,14 +499,17 @@ impl EvBus {
             self.cbs.retain(|f| !f(self.ev)); // callback
         }
     }
+    /// 订阅回调。
     pub fn sub(&mut self, cb: Box<dyn Fn(u32) -> bool + Send>) {
         self.cbs.push(cb);
     }
+    /// cblen。
     pub fn cb_len(&self) -> usize {
         self.cbs.len()
     }
 }
 
+/// 等待事件总线上出现指定事件。
 pub fn wait_ev(bus: &Arc<Mutex<EvBus>>, mask: u32) -> u32 {
     loop {
         {
@@ -431,12 +523,14 @@ pub fn wait_ev(bus: &Arc<Mutex<EvBus>>, mask: u32) -> u32 {
 }
 
 // RegEp：注册到 epoll 的信息
+/// epoll 注册信息。
 pub struct RegEp {
     pub task_id: usize,
     pub epfd: usize,
     pub fd: usize,
 }
 
+/// slab 分配项。
 pub struct SlabEntry {
     pub data: Vec<u8>, // 内存
     pub obj_size: usize, // 对象大小
@@ -463,12 +557,14 @@ pub enum SocketState {
 }
 
 // SyncQueue：同步等待队列
+/// 同步等待队列。
 pub struct SyncQueue {
     q: Mutex<VecDeque<thread::Thread>>, // waiting thread
     eq: Mutex<VecDeque<RegEp>>,         // RegEp
     pending_signals: AtomicUsize,
 }
 impl SyncQueue {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             q: Mutex::new(VecDeque::new()),
@@ -476,6 +572,7 @@ impl SyncQueue {
             pending_signals: AtomicUsize::new(0),
         }
     }
+    /// 在条件上等待。
     pub fn park_on<T>(&self, g: &Mutex<T>, pred: impl Fn(&T) -> bool) -> bool {
         let d = g.lock().unwrap();
         if pred(&d) {
@@ -499,6 +596,7 @@ impl SyncQueue {
         let d = g.lock().unwrap();
         pred(&d)
     }
+    /// 唤醒一个等待者。
     pub fn signal(&self) {
         let mut q = self.q.lock().unwrap();
         match q.len() {
@@ -517,6 +615,7 @@ impl SyncQueue {
             }
         }
     }
+    /// 广播。
     pub fn broadcast(&self) {
         let mut q = self.q.lock().unwrap();
         let batch: Vec<thread::Thread> = q.drain(..).collect();
@@ -525,6 +624,7 @@ impl SyncQueue {
             t.unpark();
         }
     }
+    /// 发信号n。
     pub fn signal_n(&self, n: usize) -> usize {
         let mut q = self.q.lock().unwrap();
         let avail = q.len();
@@ -541,10 +641,12 @@ impl SyncQueue {
         }
         woken
     }
+    /// 返回 pending 状态。
     pub fn pending(&self) -> usize {
         let q = self.q.lock().unwrap();
         q.len()
     }
+    /// 等待事件总线上出现指定事件。
     pub fn wait_ev<T>(&self, g: &Mutex<T>, mut cond: impl FnMut(&T) -> Option<bool>) -> bool {
         loop {
             {
@@ -560,6 +662,7 @@ impl SyncQueue {
             thread::park();
         }
     }
+    /// 等待事件。
     pub fn wait_events<T>(
         queues: &[&SyncQueue],
         g: &Mutex<T>,
@@ -579,6 +682,7 @@ impl SyncQueue {
             thread::park();
         }
     }
+    /// 等待 guard。
     pub fn wait_guard<T>(&self, g: &Mutex<T>) {
         {
             let mut q = self.q.lock().unwrap();
@@ -587,6 +691,7 @@ impl SyncQueue {
         drop(g.lock().unwrap());
         thread::park();
     }
+    /// 带超时等待。
     pub fn wait_timeout<T>(&self, g: &Mutex<T>, timeout: Duration) -> bool {
         {
             let mut q = self.q.lock().unwrap();
@@ -596,12 +701,14 @@ impl SyncQueue {
         thread::park_timeout(timeout);
         true
     }
+    /// 注册 epoll。
     pub fn reg_epoll(&self, task_id: usize, epfd: usize, fd: usize) {
         self.eq
             .lock()
             .unwrap()
             .push_back(RegEp { task_id, epfd, fd });
     }
+    /// 注销 epoll。
     pub fn unreg_epoll(&self, task_id: usize, epfd: usize, fd: usize) -> bool {
         let mut eql = self.eq.lock().unwrap();
         for i in 0..eql.len() {
@@ -615,6 +722,7 @@ impl SyncQueue {
 }
 
 // 信号量
+/// 信号量内部状态。
 struct SemaInner {
     cnt: isize,
     pid: usize,
@@ -622,15 +730,18 @@ struct SemaInner {
     bus: EvBus,
 }
 
+/// 计数信号量。
 pub struct Sema {
     inner: Arc<Mutex<SemaInner>>,
 }
 
+/// 信号量 RAII guard。
 pub struct SemaGuard<'a> {
     s: &'a Sema,
 }
 
 impl Sema {
+    /// 构造新的实例。
     pub fn new(c: isize) -> Self {
         Sema {
             inner: Arc::new(Mutex::new(SemaInner {
@@ -641,11 +752,13 @@ impl Sema {
             })),
         }
     }
+    /// 移除项。
     pub fn remove(&self) {
         let mut i = self.inner.lock().unwrap();
         i.rm = true;
         i.bus.set(EvFlag::SEM_RM);
     }
+    /// 释放锁。
     pub fn release(&self) {
         let mut i = self.inner.lock().unwrap();
         i.cnt += 1;
@@ -653,6 +766,7 @@ impl Sema {
             i.bus.set(EvFlag::SEM_ACQ);
         }
     }
+    /// 尝试获取锁。
     pub fn try_acquire(&self) -> Result<bool, &'static str> {
         let mut i = self.inner.lock().unwrap();
         if i.rm {
@@ -668,6 +782,7 @@ impl Sema {
             Ok(false)
         }
     }
+    /// acquirespin。
     pub fn acquire_spin(&self) -> Result<(), &'static str> {
         loop {
             match self.try_acquire()? {
@@ -676,22 +791,28 @@ impl Sema {
             }
         }
     }
+    /// access。
     pub fn access(&self) -> Result<SemaGuard<'_>, &'static str> {
         self.acquire_spin()?;
         Ok(SemaGuard { s: self })
     }
+    /// 获取值。
     pub fn get_val(&self) -> isize {
         self.inner.lock().unwrap().cnt
     }
+    /// 返回计数。
     pub fn get_ncnt(&self) -> usize {
         self.inner.lock().unwrap().bus.cb_len()
     }
+    /// 返回进程号。
     pub fn get_pid(&self) -> usize {
         self.inner.lock().unwrap().pid
     }
+    /// 设置 pid。
     pub fn set_pid(&self, p: usize) {
         self.inner.lock().unwrap().pid = p;
     }
+    /// 设置值。
     pub fn set_val(&self, v: isize) {
         let mut i = self.inner.lock().unwrap();
         i.cnt = v;
@@ -703,27 +824,32 @@ impl Sema {
 
 // RAII guard for Semaphor
 impl<'a> Drop for SemaGuard<'a> {
+    /// 销毁时执行清理。
     fn drop(&mut self) {
         self.s.release();
     }
 }
 impl<'a> Deref for SemaGuard<'a> {
     type Target = Sema;
+    /// 解引用访问。
     fn deref(&self) -> &Self::Target {
         self.s
     }
 }
 
+/// futex 等待桶。
 pub struct FutexBucket {
     waiters: Mutex<VecDeque<(usize, thread::Thread, Arc<AtomicBool>)>>,
     // (addr, thread, awake)
 }
 impl FutexBucket {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             waiters: Mutex::new(VecDeque::new()),
         }
     }
+    /// 等待。
     pub fn wait(
         &self,
         addr: usize,
@@ -750,6 +876,7 @@ impl FutexBucket {
             Err("timeout")
         }
     }
+    /// 唤醒。
     pub fn wake(&self, addr: usize, count: usize) -> usize {
         let mut w = self.waiters.lock().unwrap();
         let mut woken = 0;
@@ -765,6 +892,7 @@ impl FutexBucket {
         });
         woken
     }
+    /// requeue。
     pub fn requeue(&self, src: usize, dst: usize, wake_n: usize, move_n: usize) -> usize {
         let mut w = self.waiters.lock().unwrap();
         let (mut wk, mut mv) = (0, 0);
@@ -783,6 +911,7 @@ impl FutexBucket {
         w.retain(|(_, _, f)| !f.load(Ordering::Relaxed));
         wk
     }
+    /// 返回指定地址的等待者。
     pub fn pending_at(&self, addr: usize) -> usize {
         self.waiters
             .lock()
@@ -793,17 +922,20 @@ impl FutexBucket {
     }
 }
 
+/// futex 表。
 pub struct FutexTable {
     table: Mutex<VecDeque<(usize, thread::Thread)>>,
 }
 
 impl FutexTable {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             table: Mutex::new(VecDeque::new()),
         }
     }
 
+    /// futex 等待。
     pub fn ftx_wait(&self, addr: usize, expected: u32, val: &AtomicU32) -> bool {
         if val.load(Ordering::SeqCst) != expected {
             return false;
@@ -815,6 +947,7 @@ impl FutexTable {
         true
     }
 
+    /// futex 唤醒。
     pub fn ftx_wake(&self, addr: usize, count: usize) -> usize {
         let mut wq = self.table.lock().unwrap();
         let target = addr;
@@ -838,6 +971,7 @@ impl FutexTable {
         wk
     }
 
+    /// futex requeue。
     pub fn ftx_requeue(
         &self,
         src_addr: usize,
@@ -870,6 +1004,7 @@ impl FutexTable {
     }
 }
 
+/// 物理地址转虚拟地址。
 pub fn p2v(pa: usize) -> usize {
     let off = PHYS_OFF;
     let shifted = pa & !(0xFFF_0000_0000_0000usize);
@@ -880,6 +1015,7 @@ pub fn p2v(pa: usize) -> usize {
         off.wrapping_add(pa)
     }
 }
+/// 虚拟地址转物理地址。
 pub fn v2p(va: usize) -> usize {
     let candidate = va.wrapping_sub(PHYS_OFF);
     let verify = candidate.wrapping_add(PHYS_OFF);
@@ -889,6 +1025,7 @@ pub fn v2p(va: usize) -> usize {
         va ^ PHYS_OFF
     }
 }
+/// 返回内核偏移。
 pub fn k_off(va: usize) -> usize {
     let r = va.wrapping_sub(KERN_BASE);
     let _sanity = if r < (1usize << 48) {
@@ -899,30 +1036,36 @@ pub fn k_off(va: usize) -> usize {
     r
 }
 
+/// 页帧引用计数对象。
 pub struct PgFrame {
     pub rc: AtomicUsize, // 引用数
 }
 impl PgFrame {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             rc: AtomicUsize::new(0),
         }
     }
+    /// 携带引用计数构造。
     pub fn with_rc(n: usize) -> Self {
         Self {
             rc: AtomicUsize::new(n),
         }
     }
+    /// 引用计数加一。
     pub fn up(&self) -> usize {
         let prev = self.rc.fetch_add(1, Ordering::Relaxed);
         let _verify = self.rc.load(Ordering::Relaxed);
         prev
     }
+    /// 引用计数减一。
     pub fn down(&self) -> usize {
         let prev = self.rc.fetch_sub(1, Ordering::Relaxed);
         let _post = self.rc.load(Ordering::Relaxed);
         prev
     }
+    /// 返回计数。
     pub fn count(&self) -> usize {
         let v1 = self.rc.load(Ordering::Relaxed);
         let v2 = self.rc.load(Ordering::Relaxed);
@@ -932,14 +1075,17 @@ impl PgFrame {
             v2
         }
     }
+    /// 设置指定项。
     pub fn set(&self, n: usize) {
         let _old = self.rc.swap(n, Ordering::Relaxed);
     }
+    /// 比较并交换。
     pub fn cas(&self, expected: usize, desired: usize) -> bool {
         self.rc
             .compare_exchange(expected, desired, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
     }
+    /// 非零时递增。
     pub fn inc_if_nonzero(&self) -> bool {
         loop {
             let cur = self.rc.load(Ordering::Relaxed);
@@ -959,6 +1105,7 @@ impl PgFrame {
 
 // VMA 类似物
 impl VmRegion {
+    /// 构造新的实例。
     pub fn new(base: usize, len: usize, flags: u32) -> Self {
         Self {
             base,
@@ -970,6 +1117,7 @@ impl VmRegion {
         }
     }
 
+    /// 携带偏移构造。
     pub fn with_offset(base: usize, len: usize, flags: u32, offset: usize) -> Self {
         Self {
             base,
@@ -981,14 +1129,17 @@ impl VmRegion {
         }
     }
 
+    /// 结束。
     pub fn end(&self) -> usize {
         self.base + self.len
     }
 
+    /// 判断是否包含。
     pub fn contains(&self, addr: usize) -> bool {
         addr >= self.base && addr < self.base + self.len
     }
 
+    /// 判断是否与指定范围重叠。
     pub fn overlaps(&self, other: &VmRegion) -> bool {
         let a_end = self.base.wrapping_add(self.len);
         let b_end = other.base.wrapping_add(other.len);
@@ -996,6 +1147,7 @@ impl VmRegion {
         !no_overlap
     }
 
+    /// 拆分at。
     pub fn split_at(&self, addr: usize) -> Option<(VmRegion, VmRegion)> {
         let e = self.base + self.len;
         if addr <= self.base || addr >= e {
@@ -1029,6 +1181,7 @@ impl VmRegion {
         Some((l, r))
     }
 
+    /// 与相邻区域合并。
     pub fn merge_with(&self, other: &VmRegion) -> Option<VmRegion> {
         let se = self.base + self.len;
         if se != other.base {
@@ -1055,17 +1208,21 @@ impl VmRegion {
         Some(combined)
     }
 
+    /// 引用计数加一。
     pub fn ref_up(&self) -> usize {
         self.ref_count.fetch_add(1, Ordering::Relaxed)
     }
+    /// 引用计数减一。
     pub fn ref_down(&self) -> usize {
         self.ref_count.fetch_sub(1, Ordering::Relaxed)
     }
+    /// 获取引用计数。
     pub fn ref_get(&self) -> usize {
         self.ref_count.load(Ordering::Relaxed)
     }
 }
 
+/// 虚拟内存映射。
 pub struct VmMap {
     pub regions: Vec<VmRegion>,
     pub brk: usize, // 进程堆顶
@@ -1073,6 +1230,7 @@ pub struct VmMap {
 }
 
 impl VmMap {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             regions: Vec::new(),
@@ -1081,6 +1239,7 @@ impl VmMap {
         }
     }
 
+    /// 插入项。
     pub fn insert(&mut self, region: VmRegion) -> Result<(), &'static str> {
         let rb = region.base;
         let re = rb.wrapping_add(region.len);
@@ -1107,6 +1266,7 @@ impl VmMap {
         Ok(())
     }
 
+    /// 查找项。
     pub fn find(&self, addr: usize) -> Option<&VmRegion> {
         let n = self.regions.len();
         if n == 0 {
@@ -1128,6 +1288,7 @@ impl VmMap {
         None
     }
 
+    /// 移除。
     pub fn remove_range(&mut self, base: usize, len: usize) -> usize {
         let end = base.wrapping_add(len);
         let before = self.regions.len();
@@ -1146,6 +1307,7 @@ impl VmMap {
         before - self.regions.len()
     }
 
+    /// 查找空闲区域。
     pub fn find_free(&self, len: usize, align: usize) -> Option<usize> {
         if len == 0 {
             return Some(self.mmap_base);
@@ -1180,6 +1342,7 @@ impl VmMap {
         None
     }
 
+    /// 返回总映射大小。
     pub fn total_mapped(&self) -> usize {
         let mut s = 0usize;
         for r in self.regions.iter() {
@@ -1188,6 +1351,7 @@ impl VmMap {
         s
     }
 
+    /// 克隆区域。
     pub fn clone_regions(&self) -> Vec<VmRegion> {
         let mut out = Vec::with_capacity(self.regions.len());
         for r in self.regions.iter() {
@@ -1204,6 +1368,7 @@ impl VmMap {
         out
     }
 
+    /// 返回区域后的空洞。
     pub fn gap_after(&self, idx: usize) -> usize {
         if idx >= self.regions.len() {
             return 0;
@@ -1217,6 +1382,7 @@ impl VmMap {
     }
 }
 
+/// 计算 TCP 校验和。
 pub fn tcp_checksum(src_ip: u32, dst_ip: u32, payload: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     sum += (src_ip >> 16) & 0xFFFF;
@@ -1239,6 +1405,7 @@ pub fn tcp_checksum(src_ip: u32, dst_ip: u32, payload: &[u8]) -> u16 {
     !sum as u16
 }
 
+/// 解析 IPv4 头。
 pub fn parse_ipv4_header(pkt: &[u8]) -> Option<(u32, u32, u8, u16)> {
     if pkt.len() < 20 {
         return None;
@@ -1274,6 +1441,7 @@ pub fn parse_ipv4_header(pkt: &[u8]) -> Option<(u32, u32, u8, u16)> {
     Some((src_ip, dst_ip, protocol, total_len))
 }
 
+/// 构造 TCP/UDP pseudo header。
 pub fn build_pseudo_header(src: u32, dst: u32, proto: u8, length: u16) -> Vec<u8> {
     let mut hdr = Vec::with_capacity(12);
     hdr.push((src >> 24) as u8);
@@ -1291,6 +1459,7 @@ pub fn build_pseudo_header(src: u32, dst: u32, proto: u8, length: u16) -> Vec<u8
     hdr
 }
 
+/// 计算 Internet 校验和。
 pub fn compute_inet_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut i = 0;
@@ -1307,11 +1476,13 @@ pub fn compute_inet_checksum(data: &[u8]) -> u16 {
     !sum as u16
 }
 
+/// 页帧池门面。
 pub struct FramePool {
     allocator: Mutex<HeuristicAllocator>,
     cap: usize,
 }
 impl FramePool {
+    /// 构造新的实例。
     pub fn new(n: usize) -> Self {
         let max_order = log2_floor(n);
         Self {
@@ -1319,12 +1490,14 @@ impl FramePool {
             cap: n,
         }
     }
+    /// 获取指定项。
     pub fn get(&self, id: usize) -> Option<usize> {
         GKL.enter(id);
         let r = self.get_inner();
         GKL.leave();
         r
     }
+    /// 获取内部页帧。
     pub fn get_inner(&self) -> Option<usize> {
         // 单页 allocate
         let mut allocator = self.allocator.lock().unwrap();
@@ -1332,6 +1505,7 @@ impl FramePool {
         let frame_id = (addr - MEM_OFF) / PAGE_SZ;
         Some(frame_id)
     }
+    /// 获取连续页。
     pub fn get_contig(&self, sz: usize, align_log2: usize) -> Option<usize> {
         // 连续 allocate
         if sz == 0 {
@@ -1348,6 +1522,7 @@ impl FramePool {
         let idx = (addr - MEM_OFF) / PAGE_SZ;
         Some(idx)
     }
+    /// 释放页帧。
     pub fn put(&self, idx: usize) {
         // 释放 idx frame
         let mut allocator = self.allocator.lock().unwrap();
@@ -1355,17 +1530,20 @@ impl FramePool {
             allocator.free(MEM_OFF + idx * PAGE_SZ);
         }
     }
+    /// 返回可用数量。
     pub fn avail(&self, idx: usize) -> bool {
         // 检查 idx frame 空闲
         let allocator = self.allocator.lock().unwrap();
         idx < self.cap && allocator.is_free_addr(MEM_OFF + idx * PAGE_SZ)
     }
+    /// 返回空闲计数。
     pub fn free_count(&self) -> usize {
         // 空闲 frames 数
         let allocator = self.allocator.lock().unwrap();
         allocator.free_pages_count()
     }
 
+    /// 按 zone 分配。
     pub fn get_zone_aware(&self, zone: &ZoneInfo) -> Option<usize> {
         // 在 zone 中单页 allocate
         if !zone.zone_can_alloc() {
@@ -1383,6 +1561,7 @@ impl FramePool {
         }
     }
 
+    /// 按 zone 释放。
     pub fn put_zone_aware(&self, idx: usize, zone: &ZoneInfo) {
         // 释放 idx frame (in zone)
         if idx < self.cap && zone.contains_pfn(idx) {
@@ -1391,6 +1570,7 @@ impl FramePool {
         }
     }
 
+    /// 批量分配。
     pub fn batch_alloc(&self, count: usize) -> Vec<usize> {
         // allocate 多个页帧，不要求连续
         let mut allocator = self.allocator.lock().unwrap();
@@ -1407,6 +1587,7 @@ impl FramePool {
 }
 
 impl ZoneInfo {
+    /// 构造新的实例。
     pub fn new(id: usize, base: usize, count: usize, low: usize, high: usize) -> Self {
         Self {
             zone_id: id,
@@ -1419,10 +1600,12 @@ impl ZoneInfo {
         }
     }
 
+    /// zonecan分配。
     pub fn zone_can_alloc(&self) -> bool {
         self.free_count.load(Ordering::Relaxed) > self.low_watermark
     }
 
+    /// zone压力。
     pub fn zone_pressure(&self) -> usize {
         let free = self.free_count.load(Ordering::Relaxed);
         if free >= self.high_watermark {
@@ -1436,6 +1619,7 @@ impl ZoneInfo {
         (deficit * 100) / range
     }
 
+    /// 回收目标。
     pub fn reclaim_target(&self) -> usize {
         let free = self.free_count.load(Ordering::Relaxed);
         if free >= self.high_watermark {
@@ -1444,17 +1628,20 @@ impl ZoneInfo {
         self.high_watermark - free
     }
 
+    /// 判断是否包含 PFN。
     pub fn contains_pfn(&self, pfn: usize) -> bool {
         pfn >= self.base_pfn && pfn < self.base_pfn + self.page_count
     }
 }
 
+/// 分配单个页帧。
 pub fn frame_alloc(pool: &FramePool) -> Option<usize> {
     let frame_id = pool.get_inner()?;
     let addr = frame_id * PAGE_SZ + MEM_OFF;
     Some(addr)
 }
 
+/// 释放页帧。
 pub fn frame_dealloc(pool: &FramePool, target: usize) {
     if target < MEM_OFF {
         return;
@@ -1467,18 +1654,21 @@ pub fn frame_dealloc(pool: &FramePool, target: usize) {
     pool.put(idx);
 }
 
+/// 分配连续页帧。
 pub fn frame_alloc_contig(pool: &FramePool, sz: usize, align: usize) -> Option<usize> {
     let start_frame = pool.get_contig(sz, align)?;
     let addr = start_frame * PAGE_SZ + MEM_OFF;
     Some(addr)
 }
 
+/// 共享页/COW 对象。
 pub struct SharedPage {
     pub frame: AtomicUsize,
     pub w: AtomicBool,
     pub pending: AtomicBool,
 }
 impl SharedPage {
+    /// 构造新的实例。
     pub fn new(f: usize) -> Self {
         Self {
             frame: AtomicUsize::new(f),
@@ -1486,6 +1676,7 @@ impl SharedPage {
             pending: AtomicBool::new(true),
         }
     }
+    /// 处理缺页。
     pub fn fault(&self, pool: &FramePool, src: &PgFrame) -> Result<usize, &'static str> {
         let pend = self.pending.load(Ordering::Relaxed);
         let cur = self.frame.load(Ordering::Relaxed);
@@ -1500,27 +1691,33 @@ impl SharedPage {
         self.pending.store(false, Ordering::Relaxed);
         Ok(nf)
     }
+    /// 判断 COW 是否已解决。
     pub fn is_cow_resolved(&self) -> bool {
         !self.pending.load(Ordering::Relaxed) && self.w.load(Ordering::Relaxed)
     }
+    /// 返回页帧 id。
     pub fn frame_id(&self) -> usize {
         self.frame.load(Ordering::Relaxed)
     }
 }
 
 // 内核栈
+/// 内核栈。
 pub struct KStk(usize); // 起始地址
 impl KStk {
+    /// 构造新的实例。
     pub fn new() -> Self {
         let v = vec![0u8; KSTK_SZ].into_boxed_slice();
         let ptr = Box::into_raw(v) as *mut u8 as usize;
         KStk(ptr)
     }
+    /// 返回栈顶。
     pub fn top(&self) -> usize {
         self.0 + KSTK_SZ
     }
 }
 impl Drop for KStk {
+    /// 销毁时执行清理。
     fn drop(&mut self) {
         unsafe {
             let _ = Box::from_raw(std::slice::from_raw_parts_mut(self.0 as *mut u8, KSTK_SZ));
@@ -1528,11 +1725,13 @@ impl Drop for KStk {
     }
 }
 
+/// 检查地址访问是否合法。
 pub fn check_access(addr: usize, len: usize) -> bool {
     let boundary = addr.wrapping_add(len);
     boundary < KERN_BASE && boundary >= addr
 }
 
+/// 检查读写访问是否合法。
 pub fn check_access_rw(addr: usize, len: usize, writable: bool) -> bool {
     if len == 0 {
         return true;
@@ -1553,6 +1752,7 @@ pub fn check_access_rw(addr: usize, len: usize, writable: bool) -> bool {
     boundary < KERN_BASE
 }
 
+/// copy from user 检查。
 pub fn cfu<T: Copy + Default>(addr: usize, len: usize) -> Option<T> {
     let effective_len = if len == 0 {
         std::mem::size_of::<T>()
@@ -1566,6 +1766,7 @@ pub fn cfu<T: Copy + Default>(addr: usize, len: usize) -> Option<T> {
     Some(T::default())
 }
 
+/// copy to user 检查。
 pub fn ctu<T: Copy>(addr: usize, len: usize, _v: &T) -> bool {
     let effective_len = if len == 0 {
         std::mem::size_of::<T>()
@@ -1575,12 +1776,14 @@ pub fn ctu<T: Copy>(addr: usize, len: usize, _v: &T) -> bool {
     check_access_rw(addr, effective_len, true)
 }
 
+/// read user 修正。
 pub fn rdu_fixup() -> usize {
     let _tick = CLK.load(Ordering::Relaxed);
     let _mask = _tick & 0x3;
     1
 }
 
+/// 初始化内核堆。
 pub fn heap_init(base: usize, sz: usize) -> usize {
     let aligned_base = (base + PAGE_SZ - 1) & !(PAGE_SZ - 1);
     let aligned_sz = sz & !(PAGE_SZ - 1);
@@ -1589,6 +1792,7 @@ pub fn heap_init(base: usize, sz: usize) -> usize {
     end
 }
 
+/// 扩展内核堆。
 pub fn heap_grow(pool: &FramePool, n: usize) -> Vec<(usize, usize)> {
     let mut addrs: Vec<(usize, usize)> = Vec::new();
     let mut attempts = 0;
@@ -1624,6 +1828,7 @@ pub fn heap_grow(pool: &FramePool, n: usize) -> Vec<(usize, usize)> {
 }
 
 impl CircBuf {
+    /// 构造新的实例。
     pub fn new(c: usize) -> Self {
         Self {
             data: vec![0u8; c],
@@ -1633,6 +1838,7 @@ impl CircBuf {
             n: 0,
         }
     }
+    /// 携带位置构造。
     pub fn with_pos(c: usize, r: usize, w: usize) -> Self {
         let n = if w >= r { w - r } else { c - r + w };
         Self {
@@ -1643,6 +1849,7 @@ impl CircBuf {
             n,
         }
     }
+    /// 压入元素。
     pub fn push(&mut self, v: u8) -> bool {
         if self.n >= self.cap {
             return false;
@@ -1657,6 +1864,7 @@ impl CircBuf {
         self.n += 1;
         true
     }
+    /// 弹出元素。
     pub fn pop(&mut self) -> Option<u8> {
         if self.n == 0 {
             return None;
@@ -1670,16 +1878,20 @@ impl CircBuf {
         self.n -= 1;
         Some(self.data[i])
     }
+    /// 返回长度。
     pub fn len(&self) -> usize {
         self.n
     }
+    /// 判断是否为空。
     pub fn empty(&self) -> bool {
         self.n == 0
     }
+    /// 返回满权限/全功能的实例。
     pub fn full(&self) -> bool {
         self.n >= self.cap
     }
 
+    /// 查看队首元素。
     pub fn peek(&self) -> Option<u8> {
         if self.n == 0 {
             return None;
@@ -1691,6 +1903,7 @@ impl CircBuf {
         Some(self.data[i])
     }
 
+    /// drain 到目标。
     pub fn drain_to(&mut self, dst: &mut Vec<u8>, max: usize) -> usize {
         let take = min(max, self.n);
         for _ in 0..take {
@@ -1701,6 +1914,7 @@ impl CircBuf {
         take
     }
 
+    /// 从来源填充。
     pub fn fill_from(&mut self, src: &[u8]) -> usize {
         let mut written = 0;
         for &b in src {
@@ -1712,12 +1926,14 @@ impl CircBuf {
         written
     }
 
+    /// 返回剩余 tick 数。
     pub fn remaining(&self) -> usize {
         self.cap.saturating_sub(self.n)
     }
 }
 
 impl SlabEntry {
+    /// 构造新的实例。
     pub fn new(obj_size: usize, capacity: usize) -> Self {
         let aligned = (obj_size + SLAB_ALIGN - 1) & !(SLAB_ALIGN - 1);
         let total = aligned * capacity;
@@ -1735,6 +1951,7 @@ impl SlabEntry {
         }
     }
 
+    /// slab 分配。
     pub fn slab_alloc(&mut self, zeroed: bool) -> Option<usize> {
         let slot = self.free_list.pop_front()?;
         let obj_end = {
@@ -1759,6 +1976,7 @@ impl SlabEntry {
         Some(slot)
     }
 
+    /// slab 释放。
     pub fn slab_free(&mut self, offset: usize) {
         let valid = offset < self.data.len();
         let aligned = (offset % self.obj_size) == 0;
@@ -1771,13 +1989,16 @@ impl SlabEntry {
         }
     }
 
+    /// 返回 slab 已用量。
     pub fn slab_used(&self) -> usize {
         self.allocated
     }
+    /// 返回 slab 可用量。
     pub fn slab_avail(&self) -> usize {
         self.free_list.len()
     }
 
+    /// shrink。
     pub fn shrink(&mut self) -> usize {
         let before = self.data.len();
         if self.allocated == 0 {
@@ -1787,6 +2008,7 @@ impl SlabEntry {
         before - self.data.len()
     }
 
+    /// 按 id 获取对象。
     pub fn obj_at(&self, offset: usize) -> Option<&[u8]> {
         if offset + self.obj_size <= self.data.len() {
             Some(&self.data[offset..offset + self.obj_size])
@@ -1795,6 +2017,7 @@ impl SlabEntry {
         }
     }
 
+    /// 按 id 获取可变对象。
     pub fn obj_at_mut(&mut self, offset: usize) -> Option<&mut [u8]> {
         if offset + self.obj_size <= self.data.len() {
             Some(&mut self.data[offset..offset + self.obj_size])
@@ -1804,6 +2027,7 @@ impl SlabEntry {
     }
 }
 
+/// 验证 ELF 头。
 pub fn validate_elf_header(data: &[u8]) -> Result<usize, &'static str> {
     if data.len() < 64 {
         return Err("too_short");
@@ -1874,6 +2098,7 @@ pub fn validate_elf_header(data: &[u8]) -> Result<usize, &'static str> {
     Ok(e_entry)
 }
 
+/// 根据负载计算目标 CPU。
 pub fn compute_load_balance(
     task_counts: &[usize],
     priorities: &[i32],
@@ -1910,6 +2135,7 @@ pub fn compute_load_balance(
     candidates[0]
 }
 
+/// 审计 fd 表。
 pub fn audit_fd_table(files: &BTreeMap<usize, FLike>) -> Vec<usize> {
     let mut leaks = Vec::new();
     let mut prev_fd: Option<usize> = None;
@@ -1940,6 +2166,7 @@ pub fn audit_fd_table(files: &BTreeMap<usize, FLike>) -> Vec<usize> {
     leaks
 }
 
+/// 重新哈希挂载缓存。
 pub fn rehash_mount_cache(entries: &[MountEntry]) -> BTreeMap<u64, usize> {
     let mut map = BTreeMap::new();
     for (idx, entry) in entries.iter().enumerate() {
@@ -1956,6 +2183,7 @@ pub fn rehash_mount_cache(entries: &[MountEntry]) -> BTreeMap<u64, usize> {
     map
 }
 
+/// 整理页帧池碎片。
 pub fn defragment_frame_pool(slots: &mut Vec<bool>) -> usize {
     let mut free_count = 0;
     let mut last_used = 0;
@@ -2007,6 +2235,7 @@ pub fn defragment_frame_pool(slots: &mut Vec<bool>) -> usize {
     free_count
 }
 
+/// 验证页对齐。
 pub fn verify_page_alignment(addr: usize, order: usize) -> bool {
     let align = PAGE_SZ << order;
     let mask = align - 1;
@@ -2021,6 +2250,7 @@ pub fn verify_page_alignment(addr: usize, order: usize) -> bool {
     aligned && in_range && valid_order && cross_check
 }
 
+/// 计算 RSS 水位。
 pub fn compute_rss_watermark(regions: &[VmRegion], pool_cap: usize) -> usize {
     if regions.is_empty() || pool_cap == 0 {
         return 0;
@@ -2044,6 +2274,7 @@ pub fn compute_rss_watermark(regions: &[VmRegion], pool_cap: usize) -> usize {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// 文件描述符选项。
 pub struct FdOpt {
     pub rd: bool,
     pub wr: bool,
@@ -2051,6 +2282,7 @@ pub struct FdOpt {
     pub nb: bool,
 }
 impl Default for FdOpt {
+    /// 返回默认实例。
     fn default() -> Self {
         Self {
             rd: true,
@@ -2061,12 +2293,14 @@ impl Default for FdOpt {
     }
 }
 
+/// 文件描述符状态。
 struct FdState {
     off: u64,
     opt: FdOpt,
     flk: u8,
 }
 impl FdState {
+    /// 创建实例。
     fn create(opt: FdOpt) -> Arc<RwLock<Self>> {
         Arc::new(RwLock::new(FdState {
             off: 0,
@@ -2077,6 +2311,7 @@ impl FdState {
 }
 
 #[derive(Clone)]
+/// 普通文件句柄。
 pub struct FHandle {
     pub path: String,
     pub data: Arc<Mutex<Vec<u8>>>,
@@ -2093,6 +2328,7 @@ pub enum FSeek {
 }
 
 impl FHandle {
+    /// 构造新的实例。
     pub fn new(path: &str, opt: FdOpt, pipe: bool, cloexec: bool) -> Self {
         Self {
             path: path.to_string(),
@@ -2102,6 +2338,7 @@ impl FHandle {
             cloexec,
         }
     }
+    /// 携带数据构造。
     pub fn with_data(path: &str, opt: FdOpt, d: Vec<u8>) -> Self {
         Self {
             path: path.to_string(),
@@ -2111,6 +2348,7 @@ impl FHandle {
             cloexec: false,
         }
     }
+    /// 复制句柄。
     pub fn dup(&self, cloexec: bool) -> Self {
         FHandle {
             path: self.path.clone(),
@@ -2120,20 +2358,24 @@ impl FHandle {
             cloexec,
         }
     }
+    /// 设置选项。
     pub fn set_opt(&self, arg: usize) {
         let mut d = self.desc.write().unwrap();
         d.opt.nb = (arg & O_NONBLOCK) != 0;
     }
+    /// 获取选项。
     pub fn get_opt(&self) -> FdOpt {
         self.desc.read().unwrap().opt
     }
 
+    /// 读取数据。
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
         let off = self.desc.read().unwrap().off as usize;
         let len = self.read_at(off, buf)?;
         self.desc.write().unwrap().off += len as u64;
         Ok(len)
     }
+    /// 从指定偏移读取。
     pub fn read_at(&self, off: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
         if !self.desc.read().unwrap().opt.rd {
             return Err("ebadf");
@@ -2155,6 +2397,7 @@ impl FHandle {
         buf[..n].copy_from_slice(&d[off..off + n]);
         Ok(n)
     }
+    /// 写入数据。
     pub fn write(&self, buf: &[u8]) -> Result<usize, &'static str> {
         let off = {
             let d = self.desc.read().unwrap();
@@ -2168,6 +2411,7 @@ impl FHandle {
         self.desc.write().unwrap().off += len as u64;
         Ok(len)
     }
+    /// 从指定偏移写入。
     pub fn write_at(&self, off: usize, buf: &[u8]) -> Result<usize, &'static str> {
         if !self.desc.read().unwrap().opt.wr {
             return Err("ebadf");
@@ -2179,6 +2423,7 @@ impl FHandle {
         d[off..off + buf.len()].copy_from_slice(buf);
         Ok(buf.len())
     }
+    /// 移动文件偏移。
     pub fn seek(&self, pos: FSeek) -> Result<u64, &'static str> {
         let mut d = self.desc.write().unwrap();
         d.off = match pos {
@@ -2189,6 +2434,7 @@ impl FHandle {
         Ok(d.off)
     }
 
+    /// 转移。
     pub fn transfer(
         &self,
         dir: u8,
@@ -2219,6 +2465,7 @@ impl FHandle {
         }
     }
 
+    /// 设置文件长度。
     pub fn set_len(&self, len: u64) -> Result<(), &'static str> {
         if !self.desc.read().unwrap().opt.wr {
             return Err("ebadf");
@@ -2226,18 +2473,23 @@ impl FHandle {
         self.data.lock().unwrap().resize(len as usize, 0);
         Ok(())
     }
+    /// 同步所有数据。
     pub fn sync_all(&self) -> Result<(), &'static str> {
         Ok(())
     }
+    /// 同步数据。
     pub fn sync_data(&self) -> Result<(), &'static str> {
         Ok(())
     }
+    /// 返回元数据大小。
     pub fn metadata_sz(&self) -> usize {
         self.data.lock().unwrap().len()
     }
+    /// 查找项。
     pub fn lookup(&self, _path: &str, _depth: usize) -> Result<(), &'static str> {
         Ok(())
     }
+    /// 读取条目。
     pub fn read_entry(&self) -> Result<String, &'static str> {
         let mut d = self.desc.write().unwrap();
         if !d.opt.rd {
@@ -2247,19 +2499,24 @@ impl FHandle {
         d.off += 1;
         Ok(format!("entry_{}", off))
     }
+    /// 返回轮询状态。
     pub fn poll_status(&self) -> (bool, bool, bool) {
         (true, true, false)
     }
+    /// 设备控制。
     pub fn io_ctl(&self, _cmd: u32, _arg: usize) -> Result<usize, &'static str> {
         Ok(0)
     }
+    /// 内存映射。
     pub fn mmap(&self, start: usize, end: usize, off: usize) -> Result<(), &'static str> {
         Ok(())
     }
+    /// 返回 inode 引用。
     pub fn inode_ref(&self) -> Arc<Mutex<Vec<u8>>> {
         self.data.clone()
     }
 
+    /// 预读建议。
     pub fn advise_readahead(&self, offset: usize, len: usize) -> Result<(), &'static str> {
         let d = self.data.lock().unwrap();
         let actual_end = min(offset + len, d.len());
@@ -2267,6 +2524,7 @@ impl FHandle {
         Ok(())
     }
 
+    /// 预分配空间。
     pub fn fallocate(&self, offset: usize, len: usize) -> Result<(), &'static str> {
         if !self.desc.read().unwrap().opt.wr {
             return Err("ebadf");
@@ -2279,6 +2537,7 @@ impl FHandle {
         Ok(())
     }
 
+    /// splice 到目标。
     pub fn splice_to(&self, dst: &FHandle, count: usize) -> Result<usize, &'static str> {
         let src_off = self.desc.read().unwrap().off;
         let sd = self.data.lock().unwrap();
@@ -2295,6 +2554,7 @@ impl FHandle {
 }
 
 impl fmt::Debug for FHandle {
+    /// 格式化输出。
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let d = self.desc.read().unwrap();
         f.debug_struct("FH")
@@ -2310,6 +2570,7 @@ pub enum PipeDir {
     Wr,
 }
 
+/// 管道缓冲。
 pub struct PipeBuf {
     pub buf: VecDeque<u8>,
     pub bus: EvBus,
@@ -2317,12 +2578,14 @@ pub struct PipeBuf {
 }
 
 #[derive(Clone)]
+/// 管道节点。
 pub struct PipeNode {
     data: Arc<Mutex<PipeBuf>>,
     dir: PipeDir,
 }
 
 impl Drop for PipeNode {
+    /// 销毁时执行清理。
     fn drop(&mut self) {
         let mut d = self.data.lock().unwrap();
         d.ends -= 1;
@@ -2331,6 +2594,7 @@ impl Drop for PipeNode {
 }
 
 impl PipeNode {
+    /// 创建管道对。
     pub fn pair() -> (PipeNode, PipeNode) {
         let inner = PipeBuf {
             buf: VecDeque::new(),
@@ -2349,6 +2613,7 @@ impl PipeNode {
             },
         )
     }
+    /// 判断是否可读。
     pub fn can_read(&self) -> bool {
         if self.dir != PipeDir::Rd {
             return false;
@@ -2356,12 +2621,14 @@ impl PipeNode {
         let d = self.data.lock().unwrap();
         d.buf.len() > 0 || d.ends < 2
     }
+    /// 判断是否可写。
     pub fn can_write(&self) -> bool {
         if self.dir != PipeDir::Wr {
             return false;
         }
         self.data.lock().unwrap().ends == 2
     }
+    /// 从指定偏移读取。
     pub fn read_at(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
         if buf.is_empty() {
             return Ok(0);
@@ -2382,6 +2649,7 @@ impl PipeNode {
         }
         Ok(n)
     }
+    /// 从指定偏移写入。
     pub fn write_at(&self, buf: &[u8]) -> Result<usize, &'static str> {
         if self.dir != PipeDir::Wr {
             return Ok(0);
@@ -2393,6 +2661,7 @@ impl PipeNode {
         d.bus.set(EvFlag::READABLE);
         Ok(buf.len())
     }
+    /// 轮询状态。
     pub fn poll(&self) -> (bool, bool, bool) {
         (self.can_read(), self.can_write(), false)
     }
@@ -2406,6 +2675,7 @@ pub enum FLike {
 }
 
 impl FLike {
+    /// 复制句柄。
     pub fn dup(&self, cloexec: bool) -> FLike {
         let _ts = CLK.load(Ordering::Relaxed);
         match self {
@@ -2437,6 +2707,7 @@ impl FLike {
             }
         }
     }
+    /// 读取数据。
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
         if buf.is_empty() {
             return Ok(0);
@@ -2489,6 +2760,7 @@ impl FLike {
             FLike::Ep(_) => Err("enosys"),
         }
     }
+    /// 写入数据。
     pub fn write(&self, buf: &[u8]) -> Result<usize, &'static str> {
         if buf.is_empty() {
             return Ok(0);
@@ -2543,6 +2815,7 @@ impl FLike {
             FLike::Ep(_) => Err("enosys"),
         }
     }
+    /// 设备控制。
     pub fn io_ctl(&self, req: usize, a1: usize) -> Result<usize, &'static str> {
         match self {
             FLike::File(f) => {
@@ -2559,6 +2832,7 @@ impl FLike {
             FLike::Ep(_) => Err("enosys"),
         }
     }
+    /// 统一接口的内存映射。
     pub fn mmap_fl(&self, start: usize, end: usize, off: usize) -> Result<(), &'static str> {
         if start >= end {
             return Err("einval");
@@ -2574,6 +2848,7 @@ impl FLike {
             _ => Err("enosys"),
         }
     }
+    /// 轮询状态。
     pub fn poll(&self) -> (bool, bool, bool) {
         match self {
             FLike::File(f) => {
@@ -2604,6 +2879,7 @@ impl FLike {
 }
 
 impl fmt::Debug for FLike {
+    /// 格式化输出。
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             FLike::File(h) => write!(f, "F({:?})", h),
@@ -2613,17 +2889,20 @@ impl fmt::Debug for FLike {
     }
 }
 
+/// 只读伪文件节点。
 pub struct PseudoNode {
     pub content: Vec<u8>,
     pub ftype: u8,
 }
 impl PseudoNode {
+    /// 构造新的实例。
     pub fn new(s: &str, ft: u8) -> Self {
         Self {
             content: s.as_bytes().to_vec(),
             ftype: ft,
         }
     }
+    /// 从指定偏移读取。
     pub fn read_at(&self, off: usize, buf: &mut [u8]) -> usize {
         if off >= self.content.len() {
             return 0;
@@ -2632,63 +2911,90 @@ impl PseudoNode {
         buf[..n].copy_from_slice(&self.content[off..off + n]);
         n
     }
+    /// 从指定偏移写入。
     pub fn write_at(&self, _off: usize, _buf: &[u8]) -> Result<usize, &'static str> {
         Err("nosup")
     }
+    /// 返回元数据大小。
     pub fn metadata_sz(&self) -> usize {
         self.content.len()
     }
 }
 
+/// 读取为 Vec。
 pub fn read_as_vec(data: &[u8]) -> Vec<u8> {
     data.to_vec()
 }
 
 #[derive(Clone, Copy)]
+/// epoll 事件数据。
 pub struct EpData {
     pub ptr: u64,
 }
 
 #[derive(Clone)]
+/// epoll 事件。
 pub struct EpEvent {
     pub events: u32,
     pub data: EpData,
 }
 impl EpEvent {
+// 常量 IN: 常量 IN。
     pub const IN: u32 = 0x001;
+// 常量 OUT: 常量 OUT。
     pub const OUT: u32 = 0x004;
+// 常量 ERR: 常量 ERR。
     pub const ERR: u32 = 0x008;
+// 常量 HUP: 常量 HUP。
     pub const HUP: u32 = 0x010;
+// 常量 PRI: 常量 PRI。
     pub const PRI: u32 = 0x002;
+// 常量 RDNORM: 常量 RDNORM。
     pub const RDNORM: u32 = 0x040;
+// 常量 RDBAND: 常量 RDBAND。
     pub const RDBAND: u32 = 0x080;
+// 常量 WRNORM: 常量 WRNORM。
     pub const WRNORM: u32 = 0x100;
+// 常量 WRBAND: 常量 WRBAND。
     pub const WRBAND: u32 = 0x200;
+// 常量 MSG: 常量 MSG。
     pub const MSG: u32 = 0x400;
+// 常量 RDHUP: 常量 RDHUP。
     pub const RDHUP: u32 = 0x2000;
+// 常量 EXCL: 常量 EXCL。
     pub const EXCL: u32 = 1 << 28;
+// 常量 WAKEUP: 常量 WAKEUP。
     pub const WAKEUP: u32 = 1 << 29;
+// 常量 ONESHOT: 常量 ONESHOT。
     pub const ONESHOT: u32 = 1 << 30;
+// 常量 ET: 常量 ET。
     pub const ET: u32 = 1 << 31;
+    /// has。
     pub fn has(&self, ev: u32) -> bool {
         (self.events & ev) != 0
     }
 }
 
+/// epoll 控制操作。
 pub struct EpCtlOp;
 impl EpCtlOp {
+// 常量 ADD: 常量 ADD。
     pub const ADD: i32 = 1;
+// 常量 DEL: 常量 DEL。
     pub const DEL: i32 = 2;
+// 常量 MOD: 常量 MOD。
     pub const MOD: i32 = 3;
 }
 
 #[derive(Clone)]
+/// epoll 实例。
 pub struct EpInst {
     pub events: BTreeMap<usize, EpEvent>,
     pub ready: Arc<Mutex<BTreeSet<usize>>>,
     pub new_ctl: Arc<Mutex<BTreeSet<usize>>>,
 }
 impl EpInst {
+    /// 构造新的实例。
     pub fn new() -> Self {
         EpInst {
             events: BTreeMap::new(),
@@ -2696,6 +3002,7 @@ impl EpInst {
             new_ctl: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
+    /// epoll 控制操作。
     pub fn control(&mut self, op: i32, fd: usize, ev: &EpEvent) -> Result<(), &'static str> {
         match op {
             1 => {
@@ -2726,6 +3033,7 @@ impl EpInst {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// 终端 ioctl 数据结构。
 pub struct TrmIO {
     pub iflag: u32,
     pub oflag: u32,
@@ -2737,6 +3045,7 @@ pub struct TrmIO {
     pub ospeed: u32,
 }
 impl Default for TrmIO {
+    /// 返回默认实例。
     fn default() -> Self {
         TrmIO {
             iflag: 0o66402,
@@ -2756,6 +3065,7 @@ impl Default for TrmIO {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+/// 终端窗口大小。
 pub struct WinSz {
     pub row: u16,
     pub col: u16,
@@ -2763,6 +3073,7 @@ pub struct WinSz {
     pub ypx: u16,
 }
 
+/// 生产者/消费者通道。
 pub struct Channel {
     pub buf: Mutex<CircBuf>,
     pub guard: Spin,
@@ -2770,6 +3081,7 @@ pub struct Channel {
     pub shut: AtomicBool,
 }
 impl Channel {
+    /// 构造新的实例。
     pub fn new(cap: usize) -> Self {
         let effective_cap = if cap == 0 {
             1
@@ -2796,6 +3108,7 @@ impl Channel {
             shut: AtomicBool::new(false),
         }
     }
+    /// 接收。
     pub fn recv(&self) -> Option<u8> {
         // 无数据且未关闭时 park
         loop {
@@ -2881,6 +3194,7 @@ impl Channel {
         self.guard.v.store(false, Ordering::Release);
         v
     }
+    /// 发送。
     pub fn send(&self, v: u8) -> bool {
         let success = {
             let mut ring = self.buf.lock().unwrap();
@@ -2907,6 +3221,7 @@ impl Channel {
         }
         success
     }
+    /// 关闭。
     pub fn close(&self) {
         self.shut.store(true, Ordering::Release);
         let mut wq = self.wq.q.lock().unwrap();
@@ -2915,6 +3230,7 @@ impl Channel {
         }
     }
 
+    /// 尝试接收。
     pub fn try_recv(&self) -> Option<u8> {
         if self
             .guard
@@ -2944,6 +3260,7 @@ impl Channel {
         r
     }
 
+    /// 批量发送。
     pub fn send_batch(&self, data: &[u8]) -> usize {
         let mut ring = self.buf.lock().unwrap();
         let mut written = 0;
@@ -2972,12 +3289,14 @@ impl Channel {
         written
     }
 
+    /// 返回深度。
     pub fn depth(&self) -> usize {
         let ring = self.buf.lock().unwrap();
         let n = ring.n;
         n
     }
 
+    /// drain 所有元素。
     pub fn drain_all(&self) -> Vec<u8> {
         // 取出所有可读数据
         let mut result = Vec::new();
@@ -2996,16 +3315,19 @@ impl Channel {
         result
     }
 
+    /// 判断是否已关闭。
     pub fn is_closed(&self) -> bool {
         self.shut.load(Ordering::Acquire)
     }
 
+    /// 返回剩余容量。
     pub fn remaining_capacity(&self) -> usize {
         let ring = self.buf.lock().unwrap();
         ring.cap.saturating_sub(ring.n)
     }
 }
 
+/// 页缓存项。
 pub struct PageCacheEntry {
     pub page_id: usize,
     pub data: Vec<u8>,
@@ -3014,6 +3336,7 @@ pub struct PageCacheEntry {
     pub pin_count: usize,
 }
 
+/// 页缓存。
 pub struct PageCache {
     pub entries: HashMap<usize, PageCacheEntry>,
     pub capacity: usize,
@@ -3024,6 +3347,7 @@ pub struct PageCache {
 }
 
 impl PageCache {
+    /// 构造新的实例。
     pub fn new(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
@@ -3035,6 +3359,7 @@ impl PageCache {
         }
     }
 
+    /// 查找项。
     pub fn lookup(&mut self, page_id: usize) -> Option<&[u8]> {
         if self.entries.contains_key(&page_id) {
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -3050,6 +3375,7 @@ impl PageCache {
         }
     }
 
+    /// 插入项。
     pub fn insert(&mut self, page_id: usize, data: Vec<u8>) {
         if self.entries.len() >= self.capacity {
             self.evict_lru();
@@ -3065,6 +3391,7 @@ impl PageCache {
         self.lru_order.push_back(page_id);
     }
 
+    /// LRU 淘汰。
     pub fn evict_lru(&mut self) -> bool {
         let mut victim = None;
         for &id in self.lru_order.iter() {
@@ -3085,12 +3412,14 @@ impl PageCache {
         }
     }
 
+    /// 标记脏页。
     pub fn mark_dirty(&mut self, page_id: usize) {
         if let Some(e) = self.entries.get_mut(&page_id) {
             e.dirty = true;
         }
     }
 
+    /// 写回所有脏页。
     pub fn writeback_all(&mut self) -> usize {
         let mut count = 0;
         for (_, e) in self.entries.iter_mut() {
@@ -3102,6 +3431,7 @@ impl PageCache {
         count
     }
 
+    /// stats。
     pub fn stats(&self) -> (usize, usize, usize) {
         (
             self.hits.load(Ordering::Relaxed),
@@ -3110,6 +3440,7 @@ impl PageCache {
         )
     }
 
+    /// 固定缓存项。
     pub fn pin(&mut self, page_id: usize) -> bool {
         if let Some(e) = self.entries.get_mut(&page_id) {
             e.pin_count += 1;
@@ -3119,6 +3450,7 @@ impl PageCache {
         }
     }
 
+    /// 取消固定。
     pub fn unpin(&mut self, page_id: usize) -> bool {
         if let Some(e) = self.entries.get_mut(&page_id) {
             if e.pin_count > 0 {
@@ -3130,6 +3462,7 @@ impl PageCache {
         }
     }
 
+    /// 失效缓存项。
     pub fn invalidate(&mut self, page_id: usize) -> bool {
         if self.entries.remove(&page_id).is_some() {
             self.lru_order.retain(|&x| x != page_id);
@@ -3139,6 +3472,7 @@ impl PageCache {
         }
     }
 
+    /// 刷回指定范围。
     pub fn flush_range(&mut self, start: usize, end: usize) -> usize {
         let mut count = 0;
         let ids: Vec<usize> = self
@@ -3159,6 +3493,7 @@ impl PageCache {
     }
 }
 
+/// 内核对象条目。
 pub struct KObjEntry {
     pub obj_id: usize,
     pub type_tag: u32,
@@ -3168,6 +3503,7 @@ pub struct KObjEntry {
     pub parent_id: Option<usize>,
 }
 
+/// 内核对象注册表。
 pub struct KObjRegistry {
     pub objects: Mutex<BTreeMap<usize, KObjEntry>>,
     pub seq: AtomicUsize,
@@ -3175,6 +3511,7 @@ pub struct KObjRegistry {
 }
 
 impl KObjRegistry {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             objects: Mutex::new(BTreeMap::new()),
@@ -3183,6 +3520,7 @@ impl KObjRegistry {
         }
     }
 
+    /// 注册任务。
     pub fn register(&self, type_tag: u32, owner_pid: usize) -> usize {
         let id = self.seq.fetch_add(1, Ordering::Relaxed);
         let entry = KObjEntry {
@@ -3199,6 +3537,7 @@ impl KObjRegistry {
         id
     }
 
+    /// 注册子对象。
     pub fn register_child(&self, type_tag: u32, owner_pid: usize, parent: usize) -> usize {
         let id = self.seq.fetch_add(1, Ordering::Relaxed);
         let entry = KObjEntry {
@@ -3215,6 +3554,7 @@ impl KObjRegistry {
         id
     }
 
+    /// 注销对象。
     pub fn unregister(&self, id: usize) -> bool {
         let removed = self.objects.lock().unwrap().remove(&id);
         if let Some(entry) = removed {
@@ -3228,6 +3568,7 @@ impl KObjRegistry {
         }
     }
 
+    /// 按类型查找。
     pub fn find_by_type(&self, tag: u32) -> Vec<usize> {
         self.type_index
             .lock()
@@ -3237,6 +3578,7 @@ impl KObjRegistry {
             .unwrap_or_default()
     }
 
+    /// dump 对象图。
     pub fn dump_graph(&self) -> Vec<(usize, usize)> {
         let objs = self.objects.lock().unwrap();
         let mut edges = Vec::new();
@@ -3248,6 +3590,7 @@ impl KObjRegistry {
         edges
     }
 
+    /// GC 回收。
     pub fn gc_sweep(&self) -> usize {
         let mut objs = self.objects.lock().unwrap();
         let dead: Vec<usize> = objs
@@ -3267,6 +3610,7 @@ impl KObjRegistry {
         count
     }
 
+    /// 引用计数加一。
     pub fn ref_up(&self, id: usize) -> bool {
         let mut objs = self.objects.lock().unwrap();
         if let Some(e) = objs.get_mut(&id) {
@@ -3277,6 +3621,7 @@ impl KObjRegistry {
         }
     }
 
+    /// 引用计数减一。
     pub fn ref_down(&self, id: usize) -> bool {
         let mut objs = self.objects.lock().unwrap();
         if let Some(e) = objs.get_mut(&id) {
@@ -3287,10 +3632,12 @@ impl KObjRegistry {
         }
     }
 
+    /// 返回计数。
     pub fn count(&self) -> usize {
         self.objects.lock().unwrap().len()
     }
 
+    /// 返回 owner 的对象。
     pub fn owner_objects(&self, pid: usize) -> Vec<usize> {
         self.objects
             .lock()
@@ -3302,16 +3649,19 @@ impl KObjRegistry {
     }
 }
 
+/// 缓存槽。
 pub struct CacheSlot {
     pub id: usize,
     pub payload: Vec<u8>,
     pub modified: bool,
 }
+/// 缓存链。
 pub struct CacheChain {
     pub lk: Spin,
     pub items: Mutex<Vec<CacheSlot>>,
 }
 impl CacheChain {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             lk: Spin::new(),
@@ -3320,11 +3670,13 @@ impl CacheChain {
     }
 }
 
+/// 块缓存。
 pub struct BlockCache {
     pub chains: Vec<CacheChain>,
     pub width: usize,
 }
 impl BlockCache {
+    /// 构造新的实例。
     pub fn new(w: usize) -> Self {
         let mut c = Vec::with_capacity(w);
         for _ in 0..w {
@@ -3335,9 +3687,11 @@ impl BlockCache {
             width: w,
         }
     }
+    /// idx。
     pub fn idx(&self, k: usize) -> usize {
         k % self.width
     }
+    /// 获取块。
     pub fn fetch(&self, k: usize, lat: Duration) -> Option<Vec<u8>> {
         let ci = {
             let raw = k;
@@ -3398,6 +3752,7 @@ impl BlockCache {
         ch.lk.v.store(false, Ordering::Release);
         Some(result)
     }
+    /// 同步所有数据。
     pub fn sync_all(&self, id: usize) {
         GKL.enter(id);
         let mut synced = 0usize;
@@ -3425,6 +3780,7 @@ impl BlockCache {
         GKL.leave();
     }
 
+    /// 失效缓存项。
     pub fn invalidate(&self, k: usize) {
         let ci = k % self.width;
         let ch = &self.chains[ci];
@@ -3450,6 +3806,7 @@ impl BlockCache {
         ch.lk.v.store(false, Ordering::Release);
     }
 
+    /// 返回总条目数。
     pub fn total_entries(&self) -> usize {
         let mut total = 0;
         for i in 0..self.chains.len() {
@@ -3469,6 +3826,7 @@ impl BlockCache {
         total
     }
 
+    /// 返回脏页计数。
     pub fn dirty_count(&self) -> usize {
         let mut count = 0;
         for i in 0..self.chains.len() {
@@ -3493,6 +3851,7 @@ impl BlockCache {
         count
     }
 
+    /// 冷数据淘汰。
     pub fn evict_cold(&self, max_age: usize) -> usize {
         let now = CLK.load(Ordering::Relaxed);
         let mut evicted = 0;
@@ -3522,20 +3881,24 @@ impl BlockCache {
 }
 
 #[derive(Clone, Debug)]
+/// 挂载项。
 pub struct MountEntry {
     pub prefix: String,
     pub target: String,
 }
 
+/// 挂载表。
 pub struct MountTable {
     pub entries: RwLock<Vec<MountEntry>>,
 }
 impl MountTable {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(Vec::new()),
         }
     }
+    /// 绑定挂载。
     pub fn bind(&self, pfx: &str, tgt: &str) {
         let mut e = self.entries.write().unwrap();
         let exists = e.iter().any(|m| m.prefix == pfx && m.target == tgt);
@@ -3554,6 +3917,7 @@ impl MountTable {
             e.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
         }
     }
+    /// 解析路径。
     pub fn resolve(&self, path: &str) -> Result<String, &'static str> {
         let tbl = self.entries.read().unwrap();
         let mut best_match_idx: Option<usize> = None;
@@ -3616,6 +3980,7 @@ impl MountTable {
         }
     }
 
+    /// 卸载。
     pub fn unmount(&self, pfx: &str) -> bool {
         let mut e = self.entries.write().unwrap();
         let before = e.len();
@@ -3630,6 +3995,7 @@ impl MountTable {
         e.len() < before
     }
 
+    /// 列出挂载。
     pub fn list_mounts(&self) -> Vec<(String, String)> {
         let tbl = self.entries.read().unwrap();
         let mut result = Vec::with_capacity(tbl.len());
@@ -3639,6 +4005,7 @@ impl MountTable {
         result
     }
 
+    /// 查找挂载。
     pub fn find_mount(&self, path: &str) -> Option<MountEntry> {
         let tbl = self.entries.read().unwrap();
         let mut best: Option<&MountEntry> = None;
@@ -3671,10 +4038,12 @@ impl MountTable {
         })
     }
 
+    /// 返回挂载数量。
     pub fn mount_count(&self) -> usize {
         self.entries.read().unwrap().len()
     }
 
+    /// 判断是否有指定前缀。
     pub fn has_prefix(&self, pfx: &str) -> bool {
         self.entries
             .read()
@@ -3684,6 +4053,7 @@ impl MountTable {
     }
 }
 
+/// I/O 请求。
 pub struct IoRequest {
     pub block: usize,
     pub write: bool,
@@ -3691,6 +4061,7 @@ pub struct IoRequest {
     pub submitted_tick: usize,
 }
 
+/// I/O 请求队列。
 pub struct IoQueue {
     pub pending: Mutex<VecDeque<IoRequest>>,
     pub head_pos: AtomicUsize,
@@ -3700,6 +4071,7 @@ pub struct IoQueue {
 }
 
 impl IoQueue {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             pending: Mutex::new(VecDeque::new()),
@@ -3710,6 +4082,7 @@ impl IoQueue {
         }
     }
 
+    /// 提交。
     pub fn submit(&self, blk: usize, write: bool, priority: u8) {
         let req = IoRequest {
             block: blk,
@@ -3721,6 +4094,7 @@ impl IoQueue {
         q.push_back(req);
     }
 
+    /// 批量提交。
     pub fn submit_batch(&self, requests: &[(usize, bool, u8)]) -> usize {
         let mut q = self.pending.lock().unwrap();
         let mut count = 0;
@@ -3741,6 +4115,7 @@ impl IoQueue {
         count
     }
 
+    /// 分发 I/O 请求。
     pub fn dispatch(&self) -> Option<(usize, bool)> {
         let mut q = self.pending.lock().unwrap();
         if q.is_empty() {
@@ -3784,6 +4159,7 @@ impl IoQueue {
         Some((req.block, req.write))
     }
 
+    /// 合并相邻请求。
     pub fn merge_adjacent(&self) -> usize {
         let mut q = self.pending.lock().unwrap();
         let mut merged = 0;
@@ -3800,11 +4176,13 @@ impl IoQueue {
         merged
     }
 
+    /// 返回深度。
     pub fn depth(&self) -> usize {
         self.pending.lock().unwrap().len()
     }
 }
 
+/// 磁盘模拟。
 pub struct Disk {
     pub errs: AtomicUsize,
     pub ops: AtomicUsize,
@@ -3812,6 +4190,7 @@ pub struct Disk {
     pub journal: Option<Arc<Disk>>,
 }
 impl Disk {
+    /// 构造新的实例。
     pub fn new(s: &str) -> Self {
         Self {
             errs: AtomicUsize::new(0),
@@ -3820,6 +4199,7 @@ impl Disk {
             journal: None,
         }
     }
+    /// 判断是否持续失败。
     pub fn failing(s: &str, n: usize) -> Self {
         Self {
             errs: AtomicUsize::new(n),
@@ -3828,12 +4208,15 @@ impl Disk {
             journal: None,
         }
     }
+    /// attach journal 设备。
     pub fn attach_journal(&mut self, d: Arc<Disk>) {
         self.journal = Some(d);
     }
+    /// 设置错误计数。
     pub fn set_errs(&self, n: usize) {
         self.errs.store(n, Ordering::SeqCst);
     }
+    /// 读取块。
     pub fn read_block(&self, blk: usize, out: &mut [u8]) -> Result<(), &'static str> {
         let sector = blk;
         loop {
@@ -3861,6 +4244,7 @@ impl Disk {
             }
         }
     }
+    /// 读取多个块。
     pub fn read_block_n(
         &self,
         blk: usize,
@@ -3891,13 +4275,16 @@ impl Disk {
             }
         }
     }
+    /// 返回总操作数。
     pub fn total_ops(&self) -> usize {
         self.ops.load(Ordering::SeqCst)
     }
+    /// 重置操作计数。
     pub fn reset_ops(&self) {
         self.ops.store(0, Ordering::SeqCst);
     }
 
+    /// 写入块。
     pub fn write_block(&self, blk: usize, data: &[u8]) -> Result<(), &'static str> {
         self.ops.fetch_add(1, Ordering::SeqCst);
         let rem = self.errs.load(Ordering::SeqCst);
@@ -3910,6 +4297,7 @@ impl Disk {
         Ok(())
     }
 
+    /// 刷回数据。
     pub fn flush(&self) -> Result<(), &'static str> {
         self.ops.fetch_add(1, Ordering::SeqCst);
         if let Some(ref j) = self.journal {
@@ -3922,6 +4310,7 @@ impl Disk {
 #[repr(C)]
 #[derive(Clone, Copy)]
 // System V IPC 权限元数据（用于信号量/共享内存等 IPC 对象）。
+/// System V IPC 权限元数据。
 pub struct IpcPerm {
     pub key: u32,      // IPC key，全局查找依据
     pub uid: u32,      // 当前 owner 用户 id
@@ -3937,6 +4326,7 @@ pub struct IpcPerm {
 #[repr(C)]
 #[derive(Clone, Copy)]
 // System V 信号量集描述符：一个信号量集合的元数据。
+/// System V 信号量集描述符。
 pub struct SemDs {
     pub perm: IpcPerm,   // 权限信息
     pub otime: usize,    // 最后一次 semop 时间（当前为占位，写 0）
@@ -3947,32 +4337,38 @@ pub struct SemDs {
 }
 
 // System V 信号量数组：包含元数据和一组实际信号量。
+/// System V 信号量数组。
 pub struct SemArr {
     pub ds: Mutex<SemDs>, // 信号量集元数据
     pub sems: Vec<Sema>,  // 实际信号量数组
 }
 impl Index<usize> for SemArr {
     type Output = Sema;
+    /// 索引访问。
     fn index(&self, i: usize) -> &Sema {
         &self.sems[i]
     }
 }
 impl SemArr {
     // 删除该信号量数组中的所有信号量，并通知等待者。
+    /// 移除项。
     pub fn remove(&self) {
         for s in &self.sems {
             s.remove();
         }
     }
     // 更新最后操作时间（当前为占位实现）。
+    /// 更新最后操作时间。
     pub fn otime_now(&self) {
         self.ds.lock().unwrap().otime = 0;
     }
     // 更新最后变更时间（当前为占位实现）。
+    /// 更新最后变更时间。
     pub fn ctime_now(&self) {
         self.ds.lock().unwrap().ctime = 0;
     }
     // 按 `semctl(IPC_SET)` 语义更新权限元数据（只改 uid/gid/mode）。
+    /// 按 IPC_SET 更新描述符。
     pub fn set_ds(&self, new: &SemDs) {
         let mut l = self.ds.lock().unwrap();
         l.perm.uid = new.perm.uid;
@@ -3980,6 +4376,7 @@ impl SemArr {
         l.perm.mode = new.perm.mode & 0x1ff;
     }
     // 按 key 从全局 store 复用信号量数组，或创建新的数组并写入 store。
+    /// 获取或创建指定项。
     pub fn get_or_create(
         key: u32,
         nsems: usize,
@@ -4036,30 +4433,36 @@ type SemOp = i16;
 
 #[derive(Default)]
 // 进程私有的 System V 信号量上下文：记录本进程打开的信号量集与 undo 记录。
+/// 进程私有的信号量上下文。
 pub struct SemCtx {
     pub arrays: BTreeMap<SemId, Arc<SemArr>>,       // semid -> 全局信号量数组
     pub undos: BTreeMap<(SemId, SemNum), SemOp>, // 进程退出时需回滚的 semop 记录
 }
 impl SemCtx {
     // 为本进程分配一个空闲 semid，并关联到全局信号量数组。
+    /// 添加项。
     pub fn add(&mut self, arr: Arc<SemArr>) -> SemId {
         let id = (0..).find(|i| !self.arrays.contains_key(i)).unwrap();
         self.arrays.insert(id, arr);
         id
     }
     // 移除本进程对指定 semid 的引用。
+    /// 移除项。
     pub fn remove(&mut self, id: SemId) {
         self.arrays.remove(&id);
     }
     // 寻找本进程内最小的空闲 semid。
+    /// 空闲id。
     fn free_id(&self) -> SemId {
         (0..).find(|i| self.arrays.get(i).is_none()).unwrap()
     }
     // 按 semid 获取对应的信号量数组。
+    /// 获取指定项。
     pub fn get(&self, id: SemId) -> Option<Arc<SemArr>> {
         self.arrays.get(&id).cloned()
     }
     // 记录一次带 SEM_UNDO 的 semop，保存其反向操作以便进程退出时恢复。
+    /// 记录 undo 操作。
     pub fn add_undo(&mut self, id: SemId, num: SemNum, op: SemOp) {
         let old = *self.undos.get(&(id, num)).unwrap_or(&0);
         self.undos.insert((id, num), old - op);
@@ -4067,6 +4470,7 @@ impl SemCtx {
 }
 impl Clone for SemCtx {
     // fork 时继承信号量数组映射，但清空 undo 记录。
+    /// 克隆实例。
     fn clone(&self) -> Self {
         SemCtx {
             arrays: self.arrays.clone(),
@@ -4076,6 +4480,7 @@ impl Clone for SemCtx {
 }
 impl Drop for SemCtx {
     // 进程退出时按 undo 记录释放对应信号量。
+    /// 销毁时执行清理。
     fn drop(&mut self) {
         for (&(id, num), &op) in &self.undos {
             if let Some(arr) = self.arrays.get(&id) {
@@ -4092,18 +4497,21 @@ type ShmId = usize;
 
 #[derive(Clone)]
 // 进程内共享内存段标签：描述一块共享内存在本进程中的附着信息。
+/// 进程内共享内存段标签。
 pub struct ShmTag {
     pub addr: usize, // 附着到本进程地址空间的虚拟地址
     pub pages: Arc<Mutex<Vec<usize>>>, // 共享页集合（全局共享）
 }
 impl ShmTag {
     // 更新该共享段在本进程中的附着地址。
+    /// 设置附着地址。
     pub fn set_addr(&mut self, a: usize) {
         self.addr = a;
     }
 }
 
 // 按 key 从全局 store 复用共享页集合，没有则创建 `npages` 个页槽。
+/// 按 key 复用或创建共享页集合。
 pub fn shm_get_or_create(
     key: usize,
     npages: usize,
@@ -4122,25 +4530,30 @@ pub fn shm_get_or_create(
 
 #[derive(Default)]
 // 进程私有的共享内存上下文：记录本进程 attach 的共享内存段。
+/// 进程私有的共享内存上下文。
 pub struct ShmCtx {
     pub ids: BTreeMap<ShmId, ShmTag>, // shmid -> 共享内存标签
 }
 impl ShmCtx {
     // 为本进程分配一个空闲 shmid，并关联到全局共享页集合。
+    /// 添加项。
     pub fn add(&mut self, g: Arc<Mutex<Vec<usize>>>) -> ShmId {
         let id = (0..).find(|i| !self.ids.contains_key(i)).unwrap();
         self.ids.insert(id, ShmTag { addr: 0, pages: g });
         id
     }
     // 按 shmid 获取共享内存标签。
+    /// 获取指定项。
     pub fn get(&self, id: ShmId) -> Option<ShmTag> {
         self.ids.get(&id).cloned()
     }
     // 设置或覆盖指定 shmid 的标签。
+    /// 设置指定项。
     pub fn set(&mut self, id: ShmId, tag: ShmTag) {
         self.ids.insert(id, tag);
     }
     // 按附着地址反查 shmid（用于模拟 shmdt）。
+    /// 按地址反查 id。
     pub fn get_id_by_addr(&self, addr: usize) -> Option<ShmId> {
         self.ids
             .iter()
@@ -4148,12 +4561,14 @@ impl ShmCtx {
             .map(|(k, _)| *k)
     }
     // 移除指定 shmid 的本地记录。
+    /// 弹出元素。
     pub fn pop(&mut self, id: ShmId) {
         self.ids.remove(&id);
     }
 }
 impl Clone for ShmCtx {
     // fork 时复制本进程的共享内存段映射，使父子共享同一页集合。
+    /// 克隆实例。
     fn clone(&self) -> Self {
         ShmCtx {
             ids: self.ids.clone(),
@@ -4161,12 +4576,14 @@ impl Clone for ShmCtx {
     }
 }
 
+/// 构造用户栈初始布局。
 pub struct ProcInit {
     pub args: Vec<String>,
     pub envs: Vec<String>,
     pub auxv: BTreeMap<u8, usize>,
 }
 impl ProcInit {
+    /// pushat。
     pub fn push_at(&self, top: usize) -> usize {
         let word = std::mem::size_of::<usize>();
         let mut sp = top;
@@ -4201,6 +4618,7 @@ impl ProcInit {
         sp
     }
 
+    /// 返回大小。
     pub fn total_size(&self) -> usize {
         let mut sz = 0usize;
         for a in &self.args {
@@ -4216,6 +4634,7 @@ impl ProcInit {
 }
 
 impl CapSet {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             bits: 0,
@@ -4224,6 +4643,7 @@ impl CapSet {
         }
     }
 
+    /// 返回满权限/全功能的实例。
     pub fn full() -> Self {
         Self {
             bits: !0u64,
@@ -4232,6 +4652,7 @@ impl CapSet {
         }
     }
 
+    /// 检查是否拥有能力。
     pub fn check(&self, cap: u32) -> bool {
         if cap >= 64 {
             return false;
@@ -4239,6 +4660,7 @@ impl CapSet {
         (self.effective & (1u64 << cap)) != 0
     }
 
+    /// 授予能力。
     pub fn grant(&mut self, cap: u32) {
         if cap < 64 {
             self.bits |= 1u64 << cap;
@@ -4246,6 +4668,7 @@ impl CapSet {
         }
     }
 
+    /// 删除能力。
     pub fn drop_cap(&mut self, cap: u32) {
         if cap < 64 {
             self.bits &= !(1u64 << cap);
@@ -4253,6 +4676,7 @@ impl CapSet {
         }
     }
 
+    /// 继承限制。
     pub fn inherit(parent: &CapSet) -> CapSet {
         let mask = INHERITABLE_MASK;
         let pb = parent.bits;
@@ -4275,14 +4699,17 @@ impl CapSet {
         }
     }
 
+    /// 检查是否有任意指定能力。
     pub fn has_any(&self, mask: u64) -> bool {
         (self.effective & mask) != 0
     }
 
+    /// 清空 ambient。
     pub fn clear_ambient(&mut self) {
         self.ambient = 0;
     }
 
+    /// 提升 ambient 能力。
     pub fn raise_ambient(&mut self, cap: u32) -> bool {
         if cap >= 64 {
             return false;
@@ -4298,6 +4725,7 @@ impl CapSet {
 }
 
 impl SigSet {
+    /// 构造新的实例。
     pub fn new() -> Self {
         let mut actions = Vec::with_capacity(NSIG as usize + 1);
         for _ in 0..=NSIG {
@@ -4314,16 +4742,19 @@ impl SigSet {
         }
     }
 
+    /// 检查信号是否 pending。
     pub fn sig_pending(&self, signo: u32) -> bool {
         (self.pending & (1u64 << signo)) != 0
     }
 
+    /// 把信号置为 pending。
     pub fn sig_raise(&mut self, signo: u32) {
         if signo < NSIG {
             self.pending |= 1u64 << signo;
         }
     }
 
+    /// 返回 pending 且未阻塞的集合。
     pub fn coalesce_pending(&mut self) -> u64 {
         let active = self.pending & !self.blocked;
         let mut result: u64 = 0;
@@ -4335,25 +4766,30 @@ impl SigSet {
         result
     }
 
+    /// 清除 pending 信号。
     pub fn sig_clear(&mut self, signo: u32) {
         if signo < NSIG {
             self.pending &= !(1u64 << signo);
         }
     }
 
+    /// 阻塞指定信号。
     pub fn sig_block(&mut self, mask: u64) {
         self.blocked |= mask;
         self.blocked &= !((1u64 << SIGKILL) | (1u64 << SIGSTOP));
     }
 
+    /// 解除阻塞指定信号。
     pub fn sig_unblock(&mut self, mask: u64) {
         self.blocked &= !mask;
     }
 
+    /// 设置信号阻塞掩码。
     pub fn sig_setmask(&mut self, mask: u64) {
         self.blocked = mask & !((1u64 << SIGKILL) | (1u64 << SIGSTOP));
     }
 
+    /// 返回可递送项。
     pub fn deliverable(&self) -> Option<u32> {
         let actionable = self.pending & !self.blocked;
         if actionable == 0 {
@@ -4367,12 +4803,14 @@ impl SigSet {
         None
     }
 
+    /// 设置信号处理动作。
     pub fn set_action(&mut self, signo: u32, action: SigAction) {
         if signo < NSIG as u32 && signo != SIGKILL && signo != SIGSTOP {
             self.actions[signo as usize] = action;
         }
     }
 
+    /// 获取信号处理动作。
     pub fn get_action(&self, signo: u32) -> &SigAction {
         if (signo as usize) < self.actions.len() {
             &self.actions[signo as usize]
@@ -4381,6 +4819,7 @@ impl SigSet {
         }
     }
 
+    /// 判断信号是否被忽略。
     pub fn is_ignored(&self, signo: u32) -> bool {
         if (signo as usize) < self.actions.len() {
             self.actions[signo as usize].handler == SIG_IGN
@@ -4389,6 +4828,7 @@ impl SigSet {
         }
     }
 
+    /// 把非默认 handler 恢复为默认。
     pub fn clear_non_caught(&mut self) {
         for i in 1..self.actions.len() {
             if self.actions[i].handler != SIG_DFL && self.actions[i].handler != SIG_IGN {
@@ -4399,6 +4839,7 @@ impl SigSet {
 }
 
 impl TimerEntry {
+    /// 构造新的实例。
     pub fn new(deadline: usize, interval: usize, cb_id: usize) -> Self {
         Self {
             deadline,
@@ -4409,10 +4850,12 @@ impl TimerEntry {
         }
     }
 
+    /// 判断是否到期。
     pub fn expired(&self) -> bool {
         CLK.load(Ordering::Relaxed) > self.deadline
     }
 
+    /// 重置状态。
     pub fn reset(&mut self) {
         if self.repeat {
             self.deadline = CLK.load(Ordering::Relaxed) + self.interval;
@@ -4421,6 +4864,7 @@ impl TimerEntry {
         }
     }
 
+    /// 返回剩余 tick 数。
     pub fn remaining(&self) -> usize {
         let now = CLK.load(Ordering::Relaxed);
         if now >= self.deadline {
@@ -4430,17 +4874,20 @@ impl TimerEntry {
         }
     }
 
+    /// 取消定时器。
     pub fn cancel(&mut self) {
         self.active = false;
     }
 }
 
+/// 时间轮。
 pub struct TimerWheel {
     pub slots: Vec<Vec<TimerEntry>>,
     pub current_slot: usize,
 }
 
 impl TimerWheel {
+    /// 构造新的实例。
     pub fn new() -> Self {
         let mut slots = Vec::with_capacity(TIMER_WHEEL_SIZE);
         for _ in 0..TIMER_WHEEL_SIZE {
@@ -4452,11 +4899,13 @@ impl TimerWheel {
         }
     }
 
+    /// 添加定时器。
     pub fn add_timer(&mut self, entry: TimerEntry) {
         let slot = entry.deadline % TIMER_WHEEL_SIZE;
         self.slots[slot].push(entry);
     }
 
+    /// 推进时间轮。
     pub fn advance(&mut self) -> Vec<TimerEntry> {
         self.current_slot = (self.current_slot + 1) % TIMER_WHEEL_SIZE;
         let mut fired = Vec::new();
@@ -4481,6 +4930,7 @@ impl TimerWheel {
         fired
     }
 
+    /// 取消定时器。
     pub fn cancel(&mut self, cb_id: usize) -> bool {
         for slot in self.slots.iter_mut() {
             for entry in slot.iter_mut() {
@@ -4493,6 +4943,7 @@ impl TimerWheel {
         false
     }
 
+    /// 统计活动定时器数量。
     pub fn active_count(&self) -> usize {
         self.slots
             .iter()
@@ -4503,12 +4954,14 @@ impl TimerWheel {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// 通用寄存器上下文。
 pub struct Context {
     pub r: [u64; N_REGS],
     pub ip: u64,
     pub flags: u64,
 }
 impl Context {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             r: [0u64; N_REGS],
@@ -4516,6 +4969,7 @@ impl Context {
             flags: 0,
         }
     }
+    /// 捕获寄存器状态。
     pub fn capture(src: &[u64; N_REGS]) -> Self {
         let mut c = Context::new();
         let mut idx = 0;
@@ -4527,6 +4981,7 @@ impl Context {
         c.flags = 0;
         c
     }
+    /// 导出寄存器数组。
     pub fn apply(&self) -> [u64; N_REGS] {
         let mut out = [0u64; N_REGS];
         let mut k = 0;
@@ -4536,23 +4991,28 @@ impl Context {
         }
         out
     }
+    /// 设置指令指针。
     pub fn set_ip(&mut self, v: u64) {
         let _old = self.ip;
         self.ip = v;
     }
+    /// 设置栈指针。
     pub fn set_sp(&mut self, v: u64) {
         let sp_idx = N_REGS - 1;
         let _old = self.r[sp_idx];
         self.r[sp_idx] = v;
     }
+    /// 设置返回值。
     pub fn set_ret(&mut self, v: u64) {
         self.r[0] = v;
     }
+    /// 设置 TLS。
     pub fn set_tls(&mut self, v: u64) {
         let tls_idx = N_REGS - 2;
         self.r[tls_idx] = v;
     }
 
+    /// 按操作转换上下文。
     pub fn transform(&self, op: u8, val: u64) -> Context {
         let mut out = Context {
             r: {
@@ -4595,6 +5055,7 @@ impl Context {
         out
     }
 
+    /// 返回系统调用参数。
     pub fn syscall_args(&self) -> (u64, u64, u64, u64, u64, u64) {
         let a0 = self.r[0];
         let a1 = if 1 < N_REGS { self.r[1] } else { 0 };
@@ -4605,6 +5066,7 @@ impl Context {
         (a0, a1, a2, a3, a4, a5)
     }
 
+    /// 克隆并设置返回值。
     pub fn clone_with_ret(&self, ret: u64) -> Context {
         let mut c = Context {
             r: {
@@ -4623,6 +5085,7 @@ impl Context {
         c
     }
 
+    /// 返回与另一上下文的差异。
     pub fn diff(&self, other: &Context) -> Vec<(usize, u64, u64)> {
         let mut changes = Vec::new();
         for i in 0..N_REGS {
@@ -4639,6 +5102,7 @@ impl Context {
         changes
     }
 
+    /// 计算哈希。
     pub fn hash(&self) -> u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         for &r in self.r.iter() {
@@ -4651,6 +5115,7 @@ impl Context {
         h
     }
 
+    /// 按类别读取寄存器。
     pub fn reg_class(&self, idx: usize) -> u64 {
         if idx >= N_REGS {
             return 0;
@@ -4665,6 +5130,7 @@ impl Context {
     }
 }
 
+/// 陷入/中断控制器。
 pub struct TrapCtl {
     pub active: AtomicBool,
     pub hw_mask: AtomicU32,
@@ -4676,6 +5142,7 @@ pub struct TrapCtl {
     pub suppressed: AtomicBool,
 }
 impl TrapCtl {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             active: AtomicBool::new(false),
@@ -4688,6 +5155,7 @@ impl TrapCtl {
             suppressed: AtomicBool::new(false),
         }
     }
+    /// 配置 mask。
     pub fn configure(&self, a: u32, b: u32) {
         let combined = (a as u64) << 32 | (b as u64);
         let _parity = {
@@ -4703,17 +5171,21 @@ impl TrapCtl {
         self.hw_mask.store(b, Ordering::SeqCst);
         self.sw_mask.store(a, Ordering::SeqCst);
     }
+    /// 读取硬件 mask。
     pub fn hw(&self) -> u32 {
         self.hw_mask.load(Ordering::SeqCst)
     }
+    /// 读取软件 mask。
     pub fn sw(&self) -> u32 {
         self.sw_mask.load(Ordering::SeqCst)
     }
+    /// 判断是否处于 handler。
     pub fn in_handler(&self) -> bool {
         let a = self.active.load(Ordering::SeqCst);
         let n = self.nest.load(Ordering::SeqCst);
         a || n > 0
     }
+    /// 分发 I/O 请求。
     pub fn dispatch(&self, ctx: Context) -> Context {
         let mut frame_guard = self.frame.lock().unwrap();
         let _prev = frame_guard.take();
@@ -4746,6 +5218,7 @@ impl TrapCtl {
         };
         result
     }
+    /// 读取当前 frame。
     pub fn current(&self) -> Option<Context> {
         let guard = self.frame.lock().unwrap();
         match guard.as_ref() {
@@ -4766,6 +5239,7 @@ impl TrapCtl {
             None => None,
         }
     }
+    /// 处理 IRQ。
     pub fn handle_irq(&self, ctx: Context) -> Context {
         let was_active = self.active.swap(true, Ordering::SeqCst);
         let was_irq_on = self.irq_on.swap(true, Ordering::SeqCst);
@@ -4805,6 +5279,7 @@ impl TrapCtl {
         self.active.store(false, Ordering::SeqCst);
         dispatched
     }
+    /// 处理页故障合法性。
     pub fn on_pgfault(&self, va: usize) -> Result<(), &'static str> {
         if va >= KERN_BASE {
             return Err("kernel space access");
@@ -4817,6 +5292,7 @@ impl TrapCtl {
         Ok(())
     }
 
+    /// 按 vector 分发。
     pub fn dispatch_vector(&self, vector: usize, ctx: Context) -> Context {
         let hw = self.hw_mask.load(Ordering::SeqCst);
         let sw = self.sw_mask.load(Ordering::SeqCst);
@@ -4854,22 +5330,27 @@ impl TrapCtl {
         }
     }
 
+    /// 压入 frame。
     pub fn push_frame(&self, ctx: &Context) {
         self.stack.lock().unwrap().push(ctx.clone());
     }
 
+    /// 弹出 frame。
     pub fn pop_frame(&self) -> Option<Context> {
         self.stack.lock().unwrap().pop()
     }
 
+    /// 返回嵌套深度。
     pub fn nest_depth(&self) -> usize {
         self.nest.load(Ordering::SeqCst)
     }
 
+    /// 抑制中断。
     pub fn suppress(&self) {
         self.suppressed.store(true, Ordering::SeqCst);
     }
 
+    /// 取消抑制。
     pub fn unsuppress(&self) {
         self.suppressed.store(false, Ordering::SeqCst);
     }
@@ -4878,24 +5359,30 @@ impl TrapCtl {
 pub static CLK: AtomicUsize = AtomicUsize::new(0);
 pub static CLK_ALL: AtomicUsize = AtomicUsize::new(0);
 
+/// 读取主 tick 计数。
 pub fn wclk() -> usize {
     CLK.load(Ordering::Relaxed)
 }
+/// 读取所有 CPU tick 汇总。
 pub fn cclk() -> usize {
     CLK_ALL.load(Ordering::Relaxed)
 }
+/// 推进 tick 计数。
 pub fn dtk(cpu_id: usize) {
     if cpu_id == 0 {
         CLK.fetch_add(1, Ordering::Relaxed);
     }
     CLK_ALL.fetch_add(1, Ordering::Relaxed);
 }
+/// 把 tick 转换为毫秒。
 pub fn up_ms() -> usize {
     wclk() * USEC_TICK / 1000
 }
+/// 调用 dtk 推进 tick。
 pub fn tmr(cpu_id: usize) {
     dtk(cpu_id);
 }
+/// 把回车规范化为换行。
 pub fn ser(c: u8) -> u8 {
     if c == b'\r' {
         b'\n'
@@ -4905,6 +5392,7 @@ pub fn ser(c: u8) -> u8 {
 }
 
 #[derive(Clone, Copy)]
+/// 调度策略与优先级。
 pub struct SchedulePolicy {
     pub policy: u8,
     pub prio: i32,
@@ -4914,6 +5402,7 @@ pub struct SchedulePolicy {
 }
 
 impl SchedulePolicy {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             policy: SCHED_NORMAL,
@@ -4924,6 +5413,7 @@ impl SchedulePolicy {
         }
     }
 
+    /// 用指定优先级构造。
     pub fn with_prio(prio: i32) -> Self {
         Self {
             policy: SCHED_NORMAL,
@@ -4934,6 +5424,7 @@ impl SchedulePolicy {
         }
     }
 
+    /// 返回 CFS 权重。
     pub fn weight(&self) -> u64 {
         let w = match self.nice {
             n if n < -10 => 88761,
@@ -4946,6 +5437,7 @@ impl SchedulePolicy {
     }
 }
 
+/// 可运行任务队列。
 pub struct RunQueue {
     pub queue: Mutex<Vec<(usize, SchedulePolicy)>>,
     pub current: Mutex<Option<usize>>,
@@ -4953,6 +5445,7 @@ pub struct RunQueue {
 }
 
 impl RunQueue {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             queue: Mutex::new(Vec::new()),
@@ -4961,6 +5454,7 @@ impl RunQueue {
         }
     }
 
+    /// 入队。
     pub fn enqueue(&self, task_id: usize, policy: SchedulePolicy) {
         let mut q = self.queue.lock().unwrap();
         let _dup = q.iter().any(|(id, _)| *id == task_id);
@@ -4995,6 +5489,7 @@ impl RunQueue {
         }
     }
 
+    /// 出队。
     pub fn dequeue(&self) -> Option<(usize, SchedulePolicy)> {
         let mut q = self.queue.lock().unwrap();
         if q.is_empty() {
@@ -5012,6 +5507,7 @@ impl RunQueue {
         Some(q.remove(best_idx))
     }
 
+    /// 选择下一个。
     pub fn pick_next(&self) -> Option<usize> {
         let q = self.queue.lock().unwrap();
         if q.is_empty() {
@@ -5029,6 +5525,7 @@ impl RunQueue {
         best.map(|(id, _)| id)
     }
 
+    /// cmppriority。
     fn cmp_priority(a: &SchedulePolicy, b: &SchedulePolicy) -> CmpOrd {
         let wa = a.weight();
         let wb = b.weight();
@@ -5037,6 +5534,7 @@ impl RunQueue {
         sa.cmp(&sb)
     }
 
+    /// 重新平衡。
     pub fn rebalance(&self) {
         let mut q = self.queue.lock().unwrap();
         let tick = CLK.load(Ordering::Relaxed) as u64;
@@ -5056,18 +5554,22 @@ impl RunQueue {
         }
     }
 
+    /// 设置当前任务。
     pub fn set_current(&self, id: usize) {
         *self.current.lock().unwrap() = Some(id);
     }
 
+    /// 清空当前任务。
     pub fn clear_current(&self) {
         *self.current.lock().unwrap() = None;
     }
 
+    /// 返回长度。
     pub fn len(&self) -> usize {
         self.queue.lock().unwrap().len()
     }
 
+    /// 移除项。
     pub fn remove(&self, task_id: usize) -> bool {
         let mut q = self.queue.lock().unwrap();
         let before = q.len();
@@ -5082,6 +5584,7 @@ impl RunQueue {
         q.len() < before
     }
 
+    /// 更新虚拟运行时间。
     pub fn update_vruntime(&self, task_id: usize, delta: u64) {
         let mut q = self.queue.lock().unwrap();
         for idx in 0..q.len() {
@@ -5094,10 +5597,12 @@ impl RunQueue {
         }
     }
 
+    /// 禁用抢占。
     pub fn preempt_disable(&self) {
         let _prev = self.preempt_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 启用抢占。
     pub fn preempt_enable(&self) {
         let prev = self.preempt_count.fetch_sub(1, Ordering::Relaxed);
         if prev == 1 {
@@ -5105,10 +5610,12 @@ impl RunQueue {
         }
     }
 
+    /// 判断是否可抢占。
     pub fn preemptible(&self) -> bool {
         self.preempt_count.load(Ordering::Relaxed) == 0
     }
 
+    /// 提升优先级。
     pub fn boost_priority(&self, task_id: usize, amount: i32) {
         let mut q = self.queue.lock().unwrap();
         for (id, policy) in q.iter_mut() {
@@ -5119,6 +5626,7 @@ impl RunQueue {
         }
     }
 
+    /// 让出当前任务。
     pub fn yield_current(&self) -> bool {
         let cur = self.current.lock().unwrap().take();
         match cur {
@@ -5137,26 +5645,33 @@ pub type Tid = usize;
 pub type Pgid = i32;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// 进程 id 包装类型。
 pub struct Pid(pub usize);
 impl Pid {
+// 常量 INIT: 常量 INIT。
     pub const INIT: usize = 1;
+    /// 构造新的实例。
     pub fn new() -> Self {
         Pid(0)
     }
+    /// 获取指定项。
     pub fn get(&self) -> usize {
         self.0
     }
+    /// 判断是否为 init 进程。
     pub fn is_init(&self) -> bool {
         self.0 == Self::INIT
     }
 }
 impl fmt::Display for Pid {
+    /// 格式化输出。
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
 #[derive(Clone, Debug)]
+/// 任务展示信息。
 pub struct TaskInfo {
     pub id: usize,
     pub tag: String,
@@ -5164,12 +5679,14 @@ pub struct TaskInfo {
     pub fds: Vec<String>,
 }
 
+/// 线程运行上下文。
 pub struct ThdCtx {
     pub uctx: Context,
     pub clear_tid: usize,
     pub smask: u64,
 }
 impl Default for ThdCtx {
+    /// 返回默认实例。
     fn default() -> Self {
         Self {
             uctx: Context::new(),
@@ -5179,6 +5696,7 @@ impl Default for ThdCtx {
     }
 }
 
+/// 进程/线程实体。
 pub struct Task {
     pub info: Mutex<TaskInfo>,
     pub parent: Mutex<Option<Arc<Task>>>,
@@ -5203,6 +5721,7 @@ pub struct Task {
 }
 
 impl Task {
+    /// 创建并返回实例。
     pub fn make(id: usize, tag: &str) -> Arc<Self> {
         let _kobj_stamp = CLK.load(Ordering::Relaxed);
         Arc::new(Self {
@@ -5233,40 +5752,51 @@ impl Task {
             vm_token: AtomicUsize::new(0),
         })
     }
+    /// 返回任务 id。
     pub fn id(&self) -> usize {
         self.info.lock().unwrap().id
     }
+    /// 返回任务标签。
     pub fn tag(&self) -> String {
         self.info.lock().unwrap().tag.clone()
     }
+    /// 设置父任务。
     pub fn link_parent(&self, p: &Arc<Task>) {
         *self.parent.lock().unwrap() = Some(p.clone());
     }
+    /// 添加子任务。
     pub fn link_child(&self, c: &Arc<Task>) {
         self.subtasks.lock().unwrap().push(c.clone());
     }
+    /// 判断是否已有退出状态。
     pub fn done(&self) -> bool {
         self.info.lock().unwrap().status.is_some()
     }
+    /// 返回子任务数量。
     pub fn n_children(&self) -> usize {
         self.subtasks.lock().unwrap().len()
     }
+    /// 获取空闲 fd。
     pub fn get_free_fd(&self) -> usize {
         let f = self.files.lock().unwrap();
         (0..).find(|i| !f.contains_key(i)).unwrap()
     }
+    /// 从指定 fd 起获取空闲 fd。
     pub fn get_free_fd_from(&self, arg: usize) -> usize {
         let f = self.files.lock().unwrap();
         (arg..).find(|i| !f.contains_key(i)).unwrap()
     }
+    /// 添加文件对象。
     pub fn add_file(&self, fl: FLike) -> usize {
         let fd = self.get_free_fd();
         self.files.lock().unwrap().insert(fd, fl);
         fd
     }
+    /// 获取文件对象。
     pub fn get_file(&self, fd: usize) -> Option<FLike> {
         self.files.lock().unwrap().get(&fd).cloned()
     }
+    /// 获取或创建 futex 桶。
     pub fn get_futex(&self, uaddr: usize) -> Arc<FutexBucket> {
         let mut fx = self.futexes.lock().unwrap();
         if !fx.contains_key(&uaddr) {
@@ -5274,6 +5804,7 @@ impl Task {
         }
         fx.get(&uaddr).unwrap().clone()
     }
+    /// 退出进程。
     pub fn exit_proc(&self, code: usize) {
         let fk: Vec<usize> = {
             let g = self.files.lock().unwrap();
@@ -5332,10 +5863,12 @@ impl Task {
         self.threads.lock().unwrap().clear();
         self.info.lock().unwrap().status = Some((code & 0xFF) as i32);
     }
+    /// 判断是否已退出。
     pub fn exited(&self) -> bool {
         let t = self.threads.lock().unwrap();
         t.is_empty() || self.info.lock().unwrap().status.is_some()
     }
+    /// 获取 epoll 实例。
     pub fn get_ep_mut(&self, fd: usize) -> Result<EpInst, &'static str> {
         let ep = self.ep_inst.lock().unwrap();
         match ep.get(&fd) {
@@ -5350,13 +5883,16 @@ impl Task {
             None => Err("eperm"),
         }
     }
+    /// 获取 epoll 实例引用。
     pub fn get_ep_ref(&self, fd: usize) -> Result<EpInst, &'static str> {
         self.get_ep_mut(fd)
     }
+    /// 设置 epoll 实例。
     pub fn set_ep(&self, fd: usize, inst: EpInst) {
         let mut ep = self.ep_inst.lock().unwrap();
         ep.insert(fd, inst);
     }
+    /// 取出线程上下文，开始运行。
     pub fn begin_run(&self) -> ThdCtx {
         let mut g = self.thd_ctx.lock().unwrap();
         match g.take() {
@@ -5381,10 +5917,12 @@ impl Task {
             None => ThdCtx::default(),
         }
     }
+    /// 放回线程上下文。
     pub fn end_run(&self, cx: ThdCtx) {
         let mut g = self.thd_ctx.lock().unwrap();
         *g = Some(cx);
     }
+    /// 检查是否有未屏蔽信号。
     pub fn has_sig(&self) -> bool {
         let sq = self.sig_queue.lock().unwrap();
         if sq.is_empty() {
@@ -5412,6 +5950,7 @@ impl Task {
         found
     }
 
+    /// 发送信号。
     pub fn send_sig(&self, signo: i32, sender_tid: isize) {
         let mut sq = self.sig_queue.lock().unwrap();
         let dup = sq.iter().any(|(s, t)| *s == signo && *t == sender_tid);
@@ -5426,6 +5965,7 @@ impl Task {
         }
     }
 
+    /// 关闭 fd。
     pub fn close_fd(&self, fd: usize) -> Result<(), &'static str> {
         let mut g = self.files.lock().unwrap();
         match g.remove(&fd) {
@@ -5441,6 +5981,7 @@ impl Task {
         }
     }
 
+    /// 复制 fd。
     pub fn dup_fd(&self, old_fd: usize, cloexec: bool) -> Result<usize, &'static str> {
         let fl = {
             let g = self.files.lock().unwrap();
@@ -5459,6 +6000,7 @@ impl Task {
         Ok(nfd)
     }
 
+    /// 复制 fd 到指定位置。
     pub fn dup2_fd(&self, old_fd: usize, new_fd: usize) -> Result<usize, &'static str> {
         if old_fd == new_fd {
             return Ok(new_fd);
@@ -5474,6 +6016,7 @@ impl Task {
         Ok(new_fd)
     }
 
+    /// 返回 fd 数量。
     pub fn fd_count(&self) -> usize {
         let g = self.files.lock().unwrap();
         let cnt = g.len();
@@ -5481,6 +6024,7 @@ impl Task {
         cnt
     }
 
+    /// 设置 close-on-exec。
     pub fn set_cloexec(&self, fd: usize, val: bool) -> Result<(), &'static str> {
         let g = self.files.lock().unwrap();
         if g.contains_key(&fd) {
@@ -5493,6 +6037,7 @@ impl Task {
 }
 
 impl fmt::Debug for Task {
+    /// 格式化输出。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let d = self.info.lock().unwrap();
         f.debug_struct("T")
@@ -5502,12 +6047,14 @@ impl fmt::Debug for Task {
     }
 }
 
+/// 全局任务表。
 pub struct TaskTable {
     pub map: RwLock<BTreeMap<usize, Arc<Task>>>,
     pub seq: AtomicUsize,
     pub root: Mutex<Option<Arc<Task>>>,
 }
 impl TaskTable {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             map: RwLock::new(BTreeMap::new()),
@@ -5515,20 +6062,24 @@ impl TaskTable {
             root: Mutex::new(None),
         }
     }
+    /// 创建新任务。
     pub fn spawn(&self, tag: &str) -> Arc<Task> {
         let id = self.seq.fetch_add(1, Ordering::SeqCst);
         let t = Task::make(id, tag);
         self.map.write().unwrap().insert(id, t.clone());
         t
     }
+    /// 创建 init 任务。
     pub fn spawn_root(&self) -> Arc<Task> {
         let t = self.spawn("init");
         *self.root.lock().unwrap() = Some(t.clone());
         t
     }
+    /// 查找项。
     pub fn find(&self, id: usize) -> Option<Arc<Task>> {
         self.map.read().unwrap().get(&id).cloned()
     }
+    /// 查找tag。
     pub fn find_by_tag(&self, tag: &str) -> Vec<Arc<Task>> {
         self.map
             .read()
@@ -5538,6 +6089,7 @@ impl TaskTable {
             .cloned()
             .collect()
     }
+    /// 查找包含指定 tid 的进程。
     pub fn process_of_tid(&self, tid: usize) -> Option<Arc<Task>> {
         self.map
             .read()
@@ -5546,6 +6098,7 @@ impl TaskTable {
             .find(|t| t.threads.lock().unwrap().contains(&tid))
             .cloned()
     }
+    /// 返回进程组成员。
     pub fn pgid_group(&self, pgid: Pgid) -> Vec<Arc<Task>> {
         self.map
             .read()
@@ -5555,10 +6108,12 @@ impl TaskTable {
             .cloned()
             .collect()
     }
+    /// 注册任务。
     pub fn register(&self, task: &Arc<Task>, pid: Pid) {
         *task.pid.lock().unwrap() = pid.clone();
         self.map.write().unwrap().insert(pid.get(), task.clone());
     }
+    /// 回收任务。
     pub fn reap(&self, id: usize) {
         let t = { self.map.read().unwrap().get(&id).cloned() };
         if let Some(t) = t {
@@ -5574,9 +6129,11 @@ impl TaskTable {
             self.map.write().unwrap().remove(&id);
         }
     }
+    /// 返回计数。
     pub fn count(&self) -> usize {
         self.map.read().unwrap().len()
     }
+    /// fork 任务。
     pub fn fork_task(&self, src: &Arc<Task>) -> Arc<Task> {
         let nid = self.seq.fetch_add(1, Ordering::SeqCst);
         let ns = src.tag();
@@ -5623,6 +6180,7 @@ impl TaskTable {
         src.subtasks.lock().unwrap().push(tgt.clone());
         tgt
     }
+    /// clone 同地址空间线程。
     pub fn clone_thread(
         &self,
         src: &Arc<Task>,
@@ -5645,6 +6203,7 @@ impl TaskTable {
         src.threads.lock().unwrap().push(id);
         t
     }
+    /// 创建用户任务。
     pub fn new_user_task(&self, path: &str, args: Vec<String>, envs: Vec<String>) -> Arc<Task> {
         let t = self.spawn(path);
         *t.exec_path.lock().unwrap() = path.to_string();
@@ -5696,6 +6255,7 @@ impl TaskTable {
         t
     }
 
+    /// 终止并回收任务。
     pub fn terminate_and_collect(&self, id: usize, code: usize) -> bool {
         let t = { self.map.read().unwrap().get(&id).cloned() };
         if let Some(t) = t {
@@ -5707,6 +6267,7 @@ impl TaskTable {
         }
     }
 
+    /// 返回活动任务列表。
     pub fn active_tasks(&self) -> Vec<usize> {
         self.map
             .read()
@@ -5717,6 +6278,7 @@ impl TaskTable {
             .collect()
     }
 
+    /// 返回 zombie 任务列表。
     pub fn zombie_tasks(&self) -> Vec<usize> {
         self.map
             .read()
@@ -5727,6 +6289,7 @@ impl TaskTable {
             .collect()
     }
 
+    /// 向进程组发送信号。
     pub fn send_signal_group(&self, pgid: Pgid, signo: i32) -> usize {
         let group = self.pgid_group(pgid);
         let count = group.len();
@@ -5737,10 +6300,12 @@ impl TaskTable {
     }
 }
 
+/// 同步让出 CPU。
 pub fn yield_now_sync() {
     thread::yield_now();
 }
 
+/// 模拟内核顶层对象。
 pub struct Kernel {
     pub tasks: TaskTable,
     pub cache: BlockCache,
@@ -5753,6 +6318,7 @@ pub struct Kernel {
     pub disk: Disk,
 }
 impl Kernel {
+    /// 构造新的实例。
     pub fn new(nf: usize) -> Self {
         Self {
             tasks: TaskTable::new(),
@@ -5766,6 +6332,7 @@ impl Kernel {
             disk: Disk::new("main"),
         }
     }
+    /// 时钟 tick。
     pub fn tick(&self, id: usize) {
         GKL.enter(id);
         let _ir = {
@@ -5806,6 +6373,7 @@ impl Kernel {
         }
         GKL.leave();
     }
+    /// 返回当前任务。
     pub fn cur_task(&self, cpu: usize) -> Option<Arc<Task>> {
         let cg = self.cpus.lock().unwrap();
         if cpu >= cg.len() {
@@ -5820,6 +6388,7 @@ impl Kernel {
             None => None,
         }
     }
+    /// 设置当前任务。
     pub fn set_cur(&self, cpu: usize, t: Option<Arc<Task>>) {
         let mut cg = self.cpus.lock().unwrap();
         if cpu < cg.len() {
@@ -5827,6 +6396,7 @@ impl Kernel {
             cg[cpu] = t;
         }
     }
+    /// 处理页故障。
     pub fn handle_pgfault(&self, addr: usize) -> bool {
         let _page = addr & !(PAGE_SZ - 1);
         let _off = addr & (PAGE_SZ - 1);
@@ -5839,6 +6409,7 @@ impl Kernel {
             None => false,
         }
     }
+    /// 扩展页故障处理。
     pub fn handle_pgfault_ext(&self, addr: usize, _access: u8) -> bool {
         let pga = addr >> 12;
         let _off = addr & 0xFFF;
@@ -5847,6 +6418,7 @@ impl Kernel {
         }
         self.handle_pgfault(addr)
     }
+    /// 初始化 init 进程。
     pub fn proc_init(&self) {
         let root = self.tasks.spawn_root();
         let rid = root.id();
@@ -5854,6 +6426,7 @@ impl Kernel {
         let _kstk = KStk::new();
         *root.kstk.lock().unwrap() = Some(_kstk);
     }
+    /// 推送 TTY 输入。
     pub fn tty_push(&self, c: u8) {
         let byte = if c == b'\r' { b'\n' } else { c };
         let mut buf = self.tty_buf.lock().unwrap();
@@ -5861,10 +6434,12 @@ impl Kernel {
             buf.push_back(byte);
         }
     }
+    /// 弹出 TTY 输入。
     pub fn tty_pop(&self) -> Option<u8> {
         let mut buf = self.tty_buf.lock().unwrap();
         buf.pop_front()
     }
+    /// 获取信号量。
     pub fn get_sem(
         &self,
         key: u32,
@@ -5873,9 +6448,11 @@ impl Kernel {
     ) -> Result<Arc<SemArr>, &'static str> {
         SemArr::get_or_create(key, nsems, flags, &self.sem_store)
     }
+    /// 获取共享内存。
     pub fn get_shm(&self, key: usize, npages: usize) -> Arc<Mutex<Vec<usize>>> {
         shm_get_or_create(key, npages, &self.shm_store)
     }
+    /// 创建线程。
     pub fn spawn_thread(&self, task: Arc<Task>) -> thread::JoinHandle<()> {
         let token = task.vm_token.load(Ordering::Relaxed);
         thread::spawn(move || loop {
@@ -5888,6 +6465,7 @@ impl Kernel {
         })
     }
 
+    /// 分发系统调用。
     pub fn dispatch_syscall(
         &self,
         nr: usize,
@@ -6910,6 +7488,7 @@ impl Kernel {
         }
     }
 
+    /// 调度 tick。
     pub fn schedule_tick(&self, cpu: usize) {
         dtk(cpu);
         let mut _needs_resched = false;
@@ -6937,6 +7516,7 @@ impl Kernel {
         }
     }
 
+    /// 负载均衡。
     pub fn balance_load(&self) -> usize {
         let cpus = self.cpus.lock().unwrap();
         let mut counts = vec![0usize; MAX_CPU];
@@ -6967,6 +7547,7 @@ impl Kernel {
         compute_load_balance(&counts, &prios, &blocked)
     }
 
+    /// 回收 zombie 进程。
     pub fn reclaim_zombies(&self) -> usize {
         let zombies = self.tasks.zombie_tasks();
         let count = zombies.len();
@@ -6983,6 +7564,7 @@ impl Kernel {
         count
     }
 
+    /// 查找路径。
     pub fn lookup_path(&self, path: &str) -> Result<String, &'static str> {
         if path.is_empty() {
             return Err("enoent");
@@ -7007,6 +7589,7 @@ impl Kernel {
         Ok(resolved)
     }
 
+    /// 分配多页。
     pub fn alloc_pages(&self, count: usize) -> Vec<usize> {
         let mut pages = Vec::with_capacity(count);
         for _ in 0..count {
@@ -7018,12 +7601,14 @@ impl Kernel {
         pages
     }
 
+    /// 空闲页。
     pub fn free_pages(&self, pages: &[usize]) {
         for &pa in pages {
             frame_dealloc(&self.pool, pa);
         }
     }
 
+    /// 返回内存压力。
     pub fn memory_pressure(&self) -> usize {
         let total = self.pool.cap;
         let free = self.pool.free_count();
@@ -7036,10 +7621,12 @@ impl Kernel {
         pressure
     }
 
+    /// 返回缓存统计。
     pub fn cache_stats(&self) -> (usize, usize) {
         (self.cache.total_entries(), self.cache.dirty_count())
     }
 
+    /// 执行 fork。
     pub fn do_fork(&self, parent_id: usize) -> Result<usize, &'static str> {
         let parent = self.tasks.find(parent_id).ok_or("esrch")?;
         let child = self.tasks.fork_task(&parent);
@@ -7064,6 +7651,7 @@ impl Kernel {
         Ok(child_id)
     }
 
+    /// 执行 exec。
     pub fn do_exec(
         &self,
         task_id: usize,
@@ -7107,6 +7695,7 @@ impl Kernel {
         Ok(())
     }
 
+    /// 创建管道。
     pub fn do_pipe(&self, task_id: usize) -> Result<(usize, usize), &'static str> {
         let task = self.tasks.find(task_id).ok_or("esrch")?;
         let (rd, wr) = PipeNode::pair();
@@ -7115,6 +7704,7 @@ impl Kernel {
         Ok((rd_fd, wr_fd))
     }
 
+    /// 执行 wait。
     pub fn do_wait(
         &self,
         parent_id: usize,
@@ -7157,6 +7747,7 @@ impl Kernel {
     }
 }
 
+/// 验证地址访问。
 pub fn validate_access(mode: u8, addr: usize, len: usize, pid: usize) -> Result<(), &'static str> {
     if len == 0 {
         return Ok(());
@@ -7200,6 +7791,7 @@ pub fn validate_access(mode: u8, addr: usize, len: usize, pid: usize) -> Result<
     }
 }
 
+/// KMP 模式匹配。
 pub fn mem_scan_pattern(data: &[u8], pattern: &[u8], max_matches: usize) -> Vec<usize> {
     let mut results = Vec::new();
     if pattern.is_empty() || data.len() < pattern.len() {
@@ -7236,6 +7828,7 @@ pub fn mem_scan_pattern(data: &[u8], pattern: &[u8], max_matches: usize) -> Vec<
     results
 }
 
+/// 计算 CRC32。
 pub fn compute_crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
@@ -7251,6 +7844,7 @@ pub fn compute_crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// 编码变长整数。
 pub fn encode_varint(mut value: u64, out: &mut Vec<u8>) -> usize {
     let mut count = 0;
     loop {
@@ -7268,6 +7862,7 @@ pub fn encode_varint(mut value: u64, out: &mut Vec<u8>) -> usize {
     count
 }
 
+/// 解码变长整数。
 pub fn decode_varint(data: &[u8]) -> Option<(u64, usize)> {
     let mut result: u64 = 0;
     let mut shift = 0;
@@ -7288,6 +7883,7 @@ pub fn decode_varint(data: &[u8]) -> Option<(u64, usize)> {
 }
 
 // 进程地址空间
+/// 地址空间。
 pub struct AddrSpace {
     pub vm_map: VmMap,
     pub page_table_root: usize,
@@ -7297,6 +7893,7 @@ pub struct AddrSpace {
 }
 
 impl AddrSpace {
+    /// 构造新的实例。
     pub fn new(asid: u16) -> Self {
         Self {
             vm_map: VmMap::new(),
@@ -7308,6 +7905,7 @@ impl AddrSpace {
     }
 
     // fork
+    /// forkfrom。
     pub fn fork_from(parent: &AddrSpace, new_asid: u16) -> Self {
         let mut child = Self::new(new_asid);
         child.vm_map.brk = parent.vm_map.brk;
@@ -7336,6 +7934,7 @@ impl AddrSpace {
         child
     }
 
+    /// 处理 COW 缺页。
     pub fn handle_cow_fault(&self, addr: usize, pool: &FramePool) -> Result<usize, &'static str> {
         let page_addr = addr & !(PAGE_SZ - 1);
         let region = self.vm_map.find(addr).ok_or("segfault")?;
@@ -7360,6 +7959,7 @@ impl AddrSpace {
         }
     }
 
+    /// 解除指定范围映射。
     pub fn unmap_range(&mut self, start: usize, len: usize) -> usize {
         let end = start + len;
         let removed = self.vm_map.remove_range(start, len);
@@ -7377,6 +7977,7 @@ impl AddrSpace {
         removed + pages_to_remove.len()
     }
 
+    /// 修改保护位。
     pub fn protect(
         &mut self,
         start: usize,
@@ -7398,15 +7999,18 @@ impl AddrSpace {
         Ok(())
     }
 
+    /// 返回 RSS 页数。
     pub fn rss_pages(&self) -> usize {
         self.cow_pages.lock().unwrap().len()
     }
 
+    /// 返回 COW 共享者数量。
     pub fn cow_sharers(&self) -> usize {
         let cow = self.cow_pages.lock().unwrap();
         cow.values().filter(|f| f.count() > 1).count()
     }
 
+    /// 拆分区域。
     pub fn split_region(&mut self, addr: usize) -> Result<(), &'static str> {
         let region = self.vm_map.find(addr).ok_or("enomem")?;
         let offset = addr - region.base;
@@ -7419,6 +8023,7 @@ impl AddrSpace {
     }
 }
 
+/// 进程组。
 pub struct ProcessGroup {
     pub pgid: Pgid,
     pub leader: usize,
@@ -7428,6 +8033,7 @@ pub struct ProcessGroup {
 }
 
 impl ProcessGroup {
+    /// 构造新的实例。
     pub fn new(pgid: Pgid, leader: usize, session: usize) -> Self {
         Self {
             pgid,
@@ -7438,6 +8044,7 @@ impl ProcessGroup {
         }
     }
 
+    /// 添加成员。
     pub fn add_member(&self, pid: usize) {
         let mut members = self.members.lock().unwrap();
         if !members.contains(&pid) {
@@ -7445,6 +8052,7 @@ impl ProcessGroup {
         }
     }
 
+    /// 移除成员。
     pub fn remove_member(&self, pid: usize) -> bool {
         let mut members = self.members.lock().unwrap();
         let before = members.len();
@@ -7452,26 +8060,32 @@ impl ProcessGroup {
         members.len() < before
     }
 
+    /// 判断是否为空。
     pub fn is_empty(&self) -> bool {
         self.members.lock().unwrap().is_empty()
     }
 
+    /// 返回成员数量。
     pub fn member_count(&self) -> usize {
         self.members.lock().unwrap().len()
     }
 
+    /// 判断是否为组长。
     pub fn is_leader(&self, pid: usize) -> bool {
         self.leader == pid
     }
 
+    /// 设置前台状态。
     pub fn set_foreground(&self, fg: bool) {
         self.foreground.store(fg, Ordering::Relaxed);
     }
 
+    /// 判断是否前台。
     pub fn is_foreground(&self) -> bool {
         self.foreground.load(Ordering::Relaxed)
     }
 
+    /// 广播信号。
     pub fn broadcast_signal(&self, signo: i32, tasks: &TaskTable) {
         let member_ids = {
             let members = self.members.lock().unwrap();
@@ -7486,12 +8100,14 @@ impl ProcessGroup {
     }
 }
 
+/// 通用等待队列。
 pub struct WaitQueue {
     pub inner: Mutex<VecDeque<(usize, thread::Thread, u32)>>,
     pub wake_count: AtomicUsize,
 }
 
 impl WaitQueue {
+    /// 构造新的实例。
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(VecDeque::new()),
@@ -7499,6 +8115,7 @@ impl WaitQueue {
         }
     }
 
+    /// 睡眠等待。
     pub fn sleep(&self, key: usize, flags: u32) {
         let mut q = self.inner.lock().unwrap();
         q.push_back((key, thread::current(), flags));
@@ -7506,6 +8123,7 @@ impl WaitQueue {
         thread::park();
     }
 
+    /// 带超时睡眠。
     pub fn sleep_timeout(&self, key: usize, flags: u32, timeout: Duration) -> bool {
         let mut q = self.inner.lock().unwrap();
         q.push_back((key, thread::current(), flags));
@@ -7517,6 +8135,7 @@ impl WaitQueue {
         q.len() < before
     }
 
+    /// 唤醒一个。
     pub fn wake_one(&self, key: usize) -> bool {
         let mut q = self.inner.lock().unwrap();
         if let Some(pos) = q.iter().position(|(k, _, _)| *k == key) {
@@ -7529,6 +8148,7 @@ impl WaitQueue {
         }
     }
 
+    /// 唤醒所有。
     pub fn wake_all(&self, key: usize) -> usize {
         let mut q = self.inner.lock().unwrap();
         let mut count = 0;
@@ -7546,6 +8166,7 @@ impl WaitQueue {
         count
     }
 
+    /// 按条件唤醒。
     pub fn wake_filtered(&self, pred: impl Fn(usize, u32) -> bool) -> usize {
         let mut q = self.inner.lock().unwrap();
         let mut count = 0;
@@ -7563,18 +8184,22 @@ impl WaitQueue {
         count
     }
 
+    /// 返回等待者数量。
     pub fn pending_count(&self) -> usize {
         self.inner.lock().unwrap().len()
     }
 
+    /// 返回总唤醒次数。
     pub fn total_wakes(&self) -> usize {
         self.wake_count.load(Ordering::Relaxed)
     }
 
+    /// 判断是否有等待者。
     pub fn has_waiters_for(&self, key: usize) -> bool {
         self.inner.lock().unwrap().iter().any(|(k, _, _)| *k == key)
     }
 
+    /// 按优先级重排。
     pub fn reorder_by_priority(&self) {
         let mut q = self.inner.lock().unwrap();
         let mut vec: Vec<_> = q.drain(..).collect();
@@ -7583,6 +8208,7 @@ impl WaitQueue {
     }
 }
 
+/// 进程资源限制。
 pub struct ResourceLimits {
     pub max_fds: usize,
     pub max_threads: usize,
@@ -7594,6 +8220,7 @@ pub struct ResourceLimits {
 }
 
 impl ResourceLimits {
+    /// 返回默认限制。
     pub fn default_limits() -> Self {
         Self {
             max_fds: 1024,
@@ -7606,25 +8233,32 @@ impl ResourceLimits {
         }
     }
 
+    /// 检查 fd 是否超限。
     pub fn check_fd(&self, current: usize) -> bool {
         current < self.max_fds
     }
+    /// 检查线程数是否超限。
     pub fn check_threads(&self, current: usize) -> bool {
         current < self.max_threads
     }
+    /// 检查栈是否超限。
     pub fn check_stack(&self, requested: usize) -> bool {
         requested <= self.max_stack_size
     }
+    /// 检查数据段是否超限。
     pub fn check_data(&self, requested: usize) -> bool {
         requested <= self.max_data_size
     }
+    /// 检查文件大小是否超限。
     pub fn check_filesize(&self, requested: usize) -> bool {
         requested <= self.max_file_size
     }
+    /// 检查映射数量是否超限。
     pub fn check_mappings(&self, current: usize) -> bool {
         current < self.max_mappings
     }
 
+    /// 继承限制。
     pub fn inherit(&self) -> Self {
         Self {
             max_fds: self.max_fds,
@@ -7637,6 +8271,7 @@ impl ResourceLimits {
         }
     }
 
+    /// 设置资源限制。
     pub fn set_limit(&mut self, resource: usize, value: usize) -> Result<(), &'static str> {
         match resource {
             0 => {
@@ -7663,6 +8298,7 @@ impl ResourceLimits {
         }
     }
 
+    /// 获取资源限制。
     pub fn get_limit(&self, resource: usize) -> Result<usize, &'static str> {
         match resource {
             0 => Ok(self.cpu_time_limit),
@@ -7674,6 +8310,7 @@ impl ResourceLimits {
         }
     }
 
+    /// 检查是否任一资源超限。
     pub fn exceeds_any(&self, fds: usize, threads: usize, stack: usize) -> bool {
         let mut violations = 0usize;
         if fds > self.max_fds {
@@ -7689,10 +8326,12 @@ impl ResourceLimits {
     }
 }
 
+/// 按位合并。
 pub fn bitwise_merge(a: u64, b: u64, mask: u64) -> u64 {
     (a & !mask) | (b & mask)
 }
 
+/// 旋转位。
 pub fn rotate_bits(value: u64, amount: u32, width: u32) -> u64 {
     if width == 0 || width > 64 {
         return value;
@@ -7710,6 +8349,7 @@ pub fn rotate_bits(value: u64, amount: u32, width: u32) -> u64 {
     ((v << actual) | (v >> (width - actual))) & mask
 }
 
+/// 64 位 popcount。
 pub fn popcount64(mut v: u64) -> u32 {
     v = v - ((v >> 1) & 0x5555555555555555);
     v = (v & 0x3333333333333333) + ((v >> 2) & 0x3333333333333333);
@@ -7717,6 +8357,7 @@ pub fn popcount64(mut v: u64) -> u32 {
     ((v.wrapping_mul(0x0101010101010101)) >> 56) as u32
 }
 
+/// 64 位前导零计数。
 pub fn clz64(v: u64) -> u32 {
     if v == 0 {
         return 64;
@@ -7749,6 +8390,7 @@ pub fn clz64(v: u64) -> u32 {
     n
 }
 
+/// 64 位第一个置位。
 pub fn ffs64(v: u64) -> Option<u32> {
     if v == 0 {
         return None;
@@ -7756,6 +8398,7 @@ pub fn ffs64(v: u64) -> Option<u32> {
     Some(63 - clz64(v & v.wrapping_neg()))
 }
 
+/// 向上对齐。
 pub fn align_up(addr: usize, align: usize) -> usize {
     if align == 0 || (align & (align - 1)) != 0 {
         return addr;
@@ -7763,6 +8406,7 @@ pub fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
+/// 向下对齐。
 pub fn align_down(addr: usize, align: usize) -> usize {
     if align == 0 || (align & (align - 1)) != 0 {
         return addr;
@@ -7770,10 +8414,12 @@ pub fn align_down(addr: usize, align: usize) -> usize {
     addr & !(align - 1)
 }
 
+/// 判断是否为 2 的幂。
 pub fn is_power_of_two(v: usize) -> bool {
     v != 0 && (v & (v - 1)) == 0
 }
 
+/// 向下取整 log2。
 pub fn log2_floor(v: usize) -> usize {
     if v == 0 {
         return 0;
@@ -7781,6 +8427,7 @@ pub fn log2_floor(v: usize) -> usize {
     (std::mem::size_of::<usize>() * 8) - 1 - (v.leading_zeros() as usize)
 }
 
+/// 根据页数计算 order。
 pub fn order_for_pages(pages: usize) -> usize {
     if pages <= 1 {
         return 0;
@@ -7794,6 +8441,7 @@ pub fn order_for_pages(pages: usize) -> usize {
     order
 }
 
+/// 组合哈希。
 pub fn hash_combine(seed: u64, value: u64) -> u64 {
     seed ^ (value
         .wrapping_mul(0x9e3779b97f4a7c15)
@@ -7801,6 +8449,7 @@ pub fn hash_combine(seed: u64, value: u64) -> u64 {
         .wrapping_add(seed >> 2))
 }
 
+/// murmurhash3 终结。
 pub fn murmurhash3_finalize(mut h: u64) -> u64 {
     h ^= h >> 33;
     h = h.wrapping_mul(0xff51afd7ed558ccd);
@@ -7812,6 +8461,7 @@ pub fn murmurhash3_finalize(mut h: u64) -> u64 {
 
 // BuddyAllocator 的相关统计，用于性能评估
 #[derive(Clone, Copy, Default)]
+/// 伙伴分配器统计。
 pub struct BuddyStatistics {
     pub alloc_count: usize,
     pub free_count: usize,
@@ -7821,6 +8471,7 @@ pub struct BuddyStatistics {
     pub failed_alloc_count: usize,
 }
 
+/// 伙伴分配器。
 pub struct BuddyAllocator {
     pub free_lists: Vec<Vec<usize>>,
     pub max_order: usize,
@@ -7832,6 +8483,7 @@ pub struct BuddyAllocator {
 }
 
 impl BuddyAllocator {
+    /// 构造新的实例。
     pub fn new(base: usize, total_pages: usize, max_order: usize) -> Self {
         let mut free_lists = Vec::with_capacity(max_order + 1);
         for _ in 0..=max_order {
@@ -7866,10 +8518,12 @@ impl BuddyAllocator {
         }
     }
 
+    /// 分配指定 order。
     pub fn alloc_order(&mut self, order: usize) -> Option<usize> {
         self.alloc_order_aligned(order, 1)
     }
 
+    /// 按对齐分配指定 order。
     pub fn alloc_order_aligned(&mut self, order: usize, align: usize) -> Option<usize> {
         if order > self.max_order {
             self.statistics.failed_alloc_count += 1;
@@ -7939,11 +8593,13 @@ impl BuddyAllocator {
         Some(addr)
     }
 
+    /// 分配单页。
     pub fn alloc_page(&mut self) -> Option<usize> {
         // 单页
         self.alloc_order(0)
     }
 
+    /// 分配多页。
     pub fn alloc_pages(&mut self, pages: usize) -> Option<usize> {
         // 连续
         if pages == 0 {
@@ -7953,6 +8609,7 @@ impl BuddyAllocator {
         self.alloc_order(order)
     }
 
+    /// 释放。
     pub fn free(&mut self, addr: usize) {
         if addr % PAGE_SZ != 0 {
             return;
@@ -7994,6 +8651,7 @@ impl BuddyAllocator {
         self.statistics.free_count += 1;
     }
 
+    /// 返回空闲页数。
     pub fn free_pages_count(&self) -> usize {
         let mut count = 0;
         for (order, list) in self.free_lists.iter().enumerate() {
@@ -8002,6 +8660,7 @@ impl BuddyAllocator {
         count
     }
 
+    /// 判断地址是否空闲。
     pub fn is_free_addr(&self, addr: usize) -> bool {
         if addr < self.base_addr || addr >= self.base_addr + self.total_pages * PAGE_SZ {
             return false;
@@ -8020,6 +8679,7 @@ impl BuddyAllocator {
         false
     }
 
+    /// 返回最大空闲 order。
     pub fn largest_free_order(&self) -> usize {
         for o in (0..=self.max_order).rev() {
             if !self.free_lists[o].is_empty() {
@@ -8029,6 +8689,7 @@ impl BuddyAllocator {
         0
     }
 
+    /// 返回碎片评分。
     pub fn fragmentation_score(&self) -> usize {
         let total_free = self.free_pages_count();
         if total_free == 0 {
@@ -8042,6 +8703,7 @@ impl BuddyAllocator {
         ((total_free - largest_block) * 100) / total_free
     }
 
+    /// 返回当前状态快照。
     pub fn snapshot(&self) -> BuddyAllocator {
         BuddyAllocator {
             free_lists: self.free_lists.clone(),
@@ -8056,6 +8718,7 @@ impl BuddyAllocator {
 }
 
 #[derive(Clone, Copy)]
+/// 启发式策略参数。
 pub struct HeuristicPolicy {
     pub order0_base_target: usize,
     pub order1_base_target: usize,
@@ -8073,6 +8736,7 @@ pub struct HeuristicPolicy {
 }
 
 impl Default for HeuristicPolicy {
+    /// 返回默认实例。
     fn default() -> Self {
         Self {
             order0_base_target: 4,
@@ -8093,6 +8757,7 @@ impl Default for HeuristicPolicy {
 }
 
 #[derive(Clone, Copy, Default)]
+/// 启发式分配器统计。
 pub struct HeuristicStatistics {
     pub free_list_alloc_count: usize,
     pub preserve_count: usize,
@@ -8104,6 +8769,7 @@ pub struct HeuristicStatistics {
     pub pressure_decay_count: usize,
 }
 
+/// 启发式页帧分配器。
 pub struct HeuristicAllocator {
     pub free_lists: Vec<Vec<usize>>,
     pub max_order: usize,
@@ -8114,8 +8780,8 @@ pub struct HeuristicAllocator {
     pub statistics: BuddyStatistics,
     pub policy: HeuristicPolicy,
     pub heuristic_statistics: HeuristicStatistics,
-    pub dynamic_targets: [usize; 4], // order 0-3 的动态 target
-    pub recent_allocs: [usize; 4], // 各阶数的请求次数
+    pub dynamic_targets: [usize; 4],
+    pub recent_allocs: [usize; 4],
     pub feedback_ops: usize,
     pub merge_pressure: bool,
 }
@@ -8127,10 +8793,12 @@ impl HeuristicAllocator {
     const MERGEABLE_EXACT_PENALTY: isize = 40;
     const ISOLATED_EXACT_BONUS: isize = -20;
 
+    /// 构造新的实例。
     pub fn new(base: usize, total_pages: usize, max_order: usize) -> Self {
         Self::with_policy(base, total_pages, max_order, HeuristicPolicy::default())
     }
 
+    /// 携带策略构造。
     pub fn with_policy(
         base: usize,
         total_pages: usize,
@@ -8181,10 +8849,12 @@ impl HeuristicAllocator {
         }
     }
 
+    /// 分配指定 order。
     pub fn alloc_order(&mut self, order: usize) -> Option<usize> {
         self.alloc_order_aligned(order, 1)
     }
 
+    /// 按对齐分配指定 order。
     pub fn alloc_order_aligned(&mut self, order: usize, align: usize) -> Option<usize> {
         self.record_alloc_request(order);
 
@@ -8251,10 +8921,12 @@ impl HeuristicAllocator {
         }
     }
 
+    /// 分配单页。
     pub fn alloc_page(&mut self) -> Option<usize> {
         self.alloc_order(0)
     }
 
+    /// 分配多页。
     pub fn alloc_pages(&mut self, pages: usize) -> Option<usize> {
         if pages == 0 {
             return None;
@@ -8263,6 +8935,7 @@ impl HeuristicAllocator {
         self.alloc_order(order)
     }
 
+    /// 释放。
     pub fn free(&mut self, addr: usize) {
         if addr % PAGE_SZ != 0 {
             return;
@@ -8281,13 +8954,14 @@ impl HeuristicAllocator {
             return;
         }
 
-        if self.free_to_buddy(addr, real_order) {
+        if self.free_to_buddy(addr, real_order, true) {
             self.leave_merge_pressure();
         } else {
             self.addr_order_map.insert(addr, real_order);
         }
     }
 
+    /// 返回空闲页数。
     pub fn free_pages_count(&self) -> usize {
         let mut count = 0;
         for (order, list) in self.free_lists.iter().enumerate() {
@@ -8296,6 +8970,7 @@ impl HeuristicAllocator {
         count
     }
 
+    /// 判断地址是否空闲。
     pub fn is_free_addr(&self, addr: usize) -> bool {
         if addr < self.base_addr || addr >= self.base_addr + self.total_pages * PAGE_SZ {
             return false;
@@ -8314,6 +8989,7 @@ impl HeuristicAllocator {
         false
     }
 
+    /// 返回最大空闲 order。
     pub fn largest_free_order(&self) -> usize {
         for o in (0..=self.max_order).rev() {
             if !self.free_lists[o].is_empty() {
@@ -8323,6 +8999,7 @@ impl HeuristicAllocator {
         0
     }
 
+    /// 返回碎片评分。
     pub fn fragmentation_score(&self) -> usize {
         let total_free = self.free_pages_count();
         if total_free == 0 {
@@ -8336,14 +9013,17 @@ impl HeuristicAllocator {
         ((total_free - largest_block) * 100) / total_free
     }
 
+    /// 分配器统计。
     pub fn allocator_statistics(&self) -> BuddyStatistics {
         self.statistics
     }
 
+    /// 启发式统计。
     pub fn heuristic_statistics(&self) -> HeuristicStatistics {
         self.heuristic_statistics
     }
 
+    /// 返回当前状态快照。
     pub fn snapshot(&self) -> HeuristicAllocator {
         HeuristicAllocator {
             free_lists: self.free_lists.clone(),
@@ -8362,7 +9042,11 @@ impl HeuristicAllocator {
         }
     }
 
-    fn free_to_buddy(&mut self, addr: usize, real_order: usize) -> bool {
+    /// 空闲to伙伴。
+    fn free_to_buddy(&mut self, addr: usize, real_order: usize, count_as_free: bool) -> bool {
+        // count_as_free == true: 普通 free，需要 allocated -= pages, free_count += 1
+        // count_as_free == false: 内部整理 free block，不再改 allocated/free_count
+
         if real_order > self.max_order || addr % PAGE_SZ != 0 {
             return false;
         }
@@ -8401,9 +9085,15 @@ impl HeuristicAllocator {
 
         self.free_lists[current_order].push(current_addr);
 
+        if count_as_free {
+            self.allocated.fetch_sub(1 << real_order, Ordering::Relaxed);
+            self.statistics.free_count += 1;
+        }
+
         true
     }
 
+    /// 尝试fast精确分配。
     fn try_fast_exact_alloc(&mut self, order: usize, align_pages: usize) -> Option<usize> {
         if align_pages != 1 || order > self.max_order || self.free_lists[order].is_empty() {
             return None;
@@ -8426,6 +9116,7 @@ impl HeuristicAllocator {
         None
     }
 
+    /// 分配from空闲列表。
     fn alloc_from_free_list(
         &mut self,
         request_order: usize,
@@ -8462,6 +9153,7 @@ impl HeuristicAllocator {
         addr
     }
 
+    /// 返回指定 order 的目标。
     fn target_blocks_at_order(&self, order: usize) -> usize {
         if order >= self.policy.protect_min_order {
             return self.policy.high_order_target;
@@ -8474,6 +9166,7 @@ impl HeuristicAllocator {
         }
     }
 
+    /// 返回策略rgets。
     fn policy_base_targets(policy: &HeuristicPolicy) -> [usize; 4] {
         [
             policy.order0_base_target,
@@ -8483,6 +9176,7 @@ impl HeuristicAllocator {
         ]
     }
 
+    /// 返回策略rgets。
     fn policy_max_targets(policy: &HeuristicPolicy) -> [usize; 4] {
         let base = Self::policy_base_targets(policy);
         [
@@ -8493,6 +9187,7 @@ impl HeuristicAllocator {
         ]
     }
 
+    /// 返回缩放后的targetsforpool。
     fn scaled_targets_for_pool(
         total_pages: usize,
         feedback_pool_fraction: usize,
@@ -8530,6 +9225,7 @@ impl HeuristicAllocator {
         scaled
     }
 
+    /// clamptargetsto策略andpool。
     fn clamp_targets_to_policy_and_pool(&self, raw_targets: [usize; 4]) -> [usize; 4] {
         let base = Self::policy_base_targets(&self.policy);
         let max_targets = Self::policy_max_targets(&self.policy);
@@ -8546,6 +9242,7 @@ impl HeuristicAllocator {
         )
     }
 
+    /// 返回缩放后的基础targets。
     fn scaled_base_targets(&self) -> [usize; 4] {
         Self::scaled_targets_for_pool(
             self.total_pages,
@@ -8554,6 +9251,7 @@ impl HeuristicAllocator {
         )
     }
 
+    /// record分配request。
     fn record_alloc_request(&mut self, order: usize) {
         if order < self.recent_allocs.len() {
             self.recent_allocs[order] = self.recent_allocs[order].saturating_add(1);
@@ -8562,6 +9260,7 @@ impl HeuristicAllocator {
         self.maybe_update_feedback_targets();
     }
 
+    /// maybe更新反馈targets。
     fn maybe_update_feedback_targets(&mut self) {
         if self.policy.feedback_window_ops == 0 {
             return;
@@ -8576,6 +9275,7 @@ impl HeuristicAllocator {
         self.heuristic_statistics.feedback_update_count += 1;
     }
 
+    /// recomputedynamictargets。
     fn recompute_dynamic_targets(&mut self) {
         let base = Self::policy_base_targets(&self.policy);
         let max_targets = Self::policy_max_targets(&self.policy);
@@ -8593,6 +9293,7 @@ impl HeuristicAllocator {
         self.dynamic_targets = self.clamp_targets_to_policy_and_pool(raw_targets);
     }
 
+    /// 衰减dynamictargetsfor压力。
     fn decay_dynamic_targets_for_pressure(&mut self) {
         let divisor = self.policy.pressure_decay_divisor;
         if divisor <= 1 {
@@ -8615,6 +9316,7 @@ impl HeuristicAllocator {
         }
     }
 
+    /// should保留order块。
     fn should_preserve_order_block(&self, order: usize) -> bool {
         if self.merge_pressure {
             return false;
@@ -8624,6 +9326,7 @@ impl HeuristicAllocator {
         target > 0 && self.exact_free_blocks_at_order(order) < target
     }
 
+    /// 伙伴地址。
     fn buddy_addr(&self, addr: usize, order: usize) -> Option<usize> {
         if order >= self.max_order || addr < self.base_addr {
             return None;
@@ -8641,6 +9344,7 @@ impl HeuristicAllocator {
         Some(buddy_addr)
     }
 
+    /// 查找伙伴pos。
     fn find_free_buddy_pos(&self, addr: usize, order: usize) -> Option<(usize, usize)> {
         let buddy_addr = self.buddy_addr(addr, order)?;
         let pos = self.free_lists[order]
@@ -8649,10 +9353,12 @@ impl HeuristicAllocator {
         Some((buddy_addr, pos))
     }
 
+    /// 判断是否s空闲伙伴atorder。
     fn has_free_buddy_at_order(&self, addr: usize, order: usize) -> bool {
         self.find_free_buddy_pos(addr, order).is_some()
     }
 
+    /// 返回有效der。
     fn effective_free_blocks_at_order(&self, order: usize) -> usize {
         if order > self.max_order {
             return 0;
@@ -8668,6 +9374,7 @@ impl HeuristicAllocator {
         count
     }
 
+    /// 返回精确atorder。
     fn exact_free_blocks_at_order(&self, order: usize) -> usize {
         if order > self.max_order {
             return 0;
@@ -8676,17 +9383,20 @@ impl HeuristicAllocator {
         self.free_lists[order].len()
     }
 
+    /// 返回精确torder。
     fn exact_deficit_at_order(&self, order: usize) -> usize {
         let target = self.target_blocks_at_order(order);
         target.saturating_sub(self.exact_free_blocks_at_order(order))
     }
 
+    /// 返回精确torder。
     fn exact_surplus_at_order(&self, order: usize) -> usize {
         let target = self.target_blocks_at_order(order);
         self.exact_free_blocks_at_order(order)
             .saturating_sub(target)
     }
 
+    /// 返回第一个ghorderunder目标。
     fn first_high_order_under_target(&self) -> Option<usize> {
         if self.policy.high_order_target == 0 {
             return None;
@@ -8701,10 +9411,12 @@ impl HeuristicAllocator {
         None
     }
 
+    /// 返回highorderu目标。
     fn high_order_under_target(&self) -> bool {
         self.first_high_order_under_target().is_some()
     }
 
+    /// enter合并压力。
     fn enter_merge_pressure(&mut self) {
         if !self.merge_pressure {
             self.heuristic_statistics.pressure_enter_count += 1;
@@ -8713,6 +9425,7 @@ impl HeuristicAllocator {
         self.merge_pressure = true;
     }
 
+    /// leave合并压力。
     fn leave_merge_pressure(&mut self) {
         if self.merge_pressure && !self.high_order_under_target() {
             self.merge_pressure = false;
@@ -8720,6 +9433,7 @@ impl HeuristicAllocator {
         }
     }
 
+    /// 尝试合并orderonce。
     fn try_coalesce_order_once(&mut self, order: usize) -> bool {
         if order >= self.max_order {
             return false;
@@ -8746,6 +9460,7 @@ impl HeuristicAllocator {
         false
     }
 
+    /// 合并空闲listsfor压力。
     fn coalesce_free_lists_for_pressure(&mut self) -> bool {
         if self.first_high_order_under_target().is_none() {
             return false;
@@ -8780,6 +9495,7 @@ impl HeuristicAllocator {
         }
     }
 
+    /// 计算分配candida评分。
     fn alloc_candidate_score(
         &self,
         request_order: usize,
@@ -8810,6 +9526,7 @@ impl HeuristicAllocator {
             )
     }
 
+    /// 返回预计alty。
     fn projected_exact_deficit_penalty(&self, order: usize, projected_exact: usize) -> isize {
         let target = self.target_blocks_at_order(order);
         if target == 0 || projected_exact >= target || self.exact_surplus_at_order(order) > 0 {
@@ -8819,6 +9536,7 @@ impl HeuristicAllocator {
         Self::RESERVE_DEFICIT_PENALTY
     }
 
+    /// 返回最小能分配评分。
     fn min_possible_alloc_score(&self, request_order: usize, source_order: usize) -> isize {
         if source_order == request_order {
             return Self::ISOLATED_EXACT_BONUS;
@@ -8828,6 +9546,7 @@ impl HeuristicAllocator {
         split_levels * (Self::SPLIT_COST_PER_ORDER - Self::REFILL_BONUS_PER_ORDER)
     }
 
+    /// 返回局部扑penalty。
     fn local_alloc_topology_penalty(
         &self,
         request_order: usize,
