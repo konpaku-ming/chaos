@@ -1695,6 +1695,7 @@ pub fn heap_grow(pool: &FramePool, n: usize) -> Vec<(usize, usize)> {
     addrs
 }
 
+// 环形缓冲区，管理 data
 impl CircBuf {
     pub fn new(c: usize) -> Self {
         Self {
@@ -2836,7 +2837,7 @@ pub struct WinSz {
 }
 
 pub struct Channel {
-    pub buf: Mutex<CircBuf>,
+    pub buf: Mutex<CircBuf>, // 存字节，其它负责同步
     pub guard: Spin,
     pub wq: SyncQueue,
     pub shut: AtomicBool,
@@ -3045,10 +3046,7 @@ impl Channel {
 
     pub fn depth(&self) -> usize {
         let ring = self.buf.lock().unwrap();
-        let _cap = ring.cap;
         let n = ring.n;
-        let _wr = ring.wr;
-        let _rd = ring.rd;
         n
     }
 
@@ -3149,6 +3147,11 @@ impl PageCache {
             }
         }
         if let Some(id) = victim {
+            if let Some(e) = self.entries.get(&id) {
+                if e.dirty && self.write_back(e.page_id, &e.data).is_err() {
+                    return false;
+                }
+            }
             self.entries.remove(&id);
             self.lru_order.retain(|&x| x != id);
             self.evictions.fetch_add(1, Ordering::Relaxed);
@@ -3162,6 +3165,11 @@ impl PageCache {
         if let Some(e) = self.entries.get_mut(&page_id) {
             e.dirty = true;
         }
+    }
+
+    pub fn write_back(&self, page_id: usize, data: &[u8]) -> Result<(), &'static str> {
+        let _ = (page_id, data.len());
+        Ok(())
     }
 
     pub fn writeback_all(&mut self) -> usize {

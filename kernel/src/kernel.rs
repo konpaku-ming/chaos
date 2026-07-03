@@ -2786,7 +2786,7 @@ impl Channel {
             },
             rd: 0,
             wr: 0,
-            cap: effective_cap,
+            cap: effective_cap, // 容量
             n: 0,
         };
         Self {
@@ -2797,6 +2797,7 @@ impl Channel {
         }
     }
     pub fn recv(&self) -> Option<u8> {
+        // 无数据且未关闭时 park
         loop {
             if self
                 .guard
@@ -2973,14 +2974,12 @@ impl Channel {
 
     pub fn depth(&self) -> usize {
         let ring = self.buf.lock().unwrap();
-        let _cap = ring.cap;
         let n = ring.n;
-        let _wr = ring.wr;
-        let _rd = ring.rd;
         n
     }
 
     pub fn drain_all(&self) -> Vec<u8> {
+        // 取出所有可读数据
         let mut result = Vec::new();
         let mut ring = self.buf.lock().unwrap();
         while ring.n > 0 {
@@ -3922,32 +3921,35 @@ impl Disk {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+// System V IPC 权限元数据（用于信号量/共享内存等 IPC 对象）。
 pub struct IpcPerm {
-    pub key: u32,
-    pub uid: u32,
-    pub gid: u32,
-    pub cuid: u32,
-    pub cgid: u32,
-    pub mode: u32,
-    pub seq: u32,
-    pub pad1: usize,
-    pub pad2: usize,
+    pub key: u32,      // IPC key，全局查找依据
+    pub uid: u32,      // 当前 owner 用户 id
+    pub gid: u32,      // 当前 owner 组 id
+    pub cuid: u32,     // 创建者用户 id
+    pub cgid: u32,     // 创建者组 id
+    pub mode: u32,     // 权限位（低 9 位）
+    pub seq: u32,      // 序列号，模拟 IPC id 回收
+    pub pad1: usize,   // 布局填充
+    pub pad2: usize,   // 布局填充
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+// System V 信号量集描述符：一个信号量集合的元数据。
 pub struct SemDs {
-    pub perm: IpcPerm,
-    pub otime: usize,
-    _p1: usize,
-    pub ctime: usize,
-    _p2: usize,
-    pub nsems: usize,
+    pub perm: IpcPerm,   // 权限信息
+    pub otime: usize,    // 最后一次 semop 时间（当前为占位，写 0）
+    _p1: usize,          // 填充
+    pub ctime: usize,    // 最后一次变更时间（当前为占位，写 0）
+    _p2: usize,          // 填充
+    pub nsems: usize,    // 信号量数量
 }
 
+// System V 信号量数组：包含元数据和一组实际信号量。
 pub struct SemArr {
-    pub ds: Mutex<SemDs>,
-    pub sems: Vec<Sema>,
+    pub ds: Mutex<SemDs>, // 信号量集元数据
+    pub sems: Vec<Sema>,  // 实际信号量数组
 }
 impl Index<usize> for SemArr {
     type Output = Sema;
@@ -3956,23 +3958,28 @@ impl Index<usize> for SemArr {
     }
 }
 impl SemArr {
+    // 删除该信号量数组中的所有信号量，并通知等待者。
     pub fn remove(&self) {
         for s in &self.sems {
             s.remove();
         }
     }
+    // 更新最后操作时间（当前为占位实现）。
     pub fn otime_now(&self) {
         self.ds.lock().unwrap().otime = 0;
     }
+    // 更新最后变更时间（当前为占位实现）。
     pub fn ctime_now(&self) {
         self.ds.lock().unwrap().ctime = 0;
     }
+    // 按 `semctl(IPC_SET)` 语义更新权限元数据（只改 uid/gid/mode）。
     pub fn set_ds(&self, new: &SemDs) {
         let mut l = self.ds.lock().unwrap();
         l.perm.uid = new.perm.uid;
         l.perm.gid = new.perm.gid;
         l.perm.mode = new.perm.mode & 0x1ff;
     }
+    // 按 key 从全局 store 复用信号量数组，或创建新的数组并写入 store。
     pub fn get_or_create(
         key: u32,
         nsems: usize,
@@ -3982,9 +3989,11 @@ impl SemArr {
         let mut m = store.write().unwrap();
         let mut k = key;
         if k == 0 {
+            // 私有 key：自动分配一个未使用的 key
             k = (1u32..).find(|i| m.get(i).is_none()).unwrap();
         } else if let Some(w) = m.get(&k) {
             if let Some(a) = w.upgrade() {
+                // 同时要求 IPC_CREAT 与 IPC_EXCL 时返回已存在错误
                 if (flags & (1 << 9)) != 0 && (flags & (1 << 10)) != 0 {
                     return Err("eexist");
                 }
@@ -4026,31 +4035,38 @@ type SemNum = u16;
 type SemOp = i16;
 
 #[derive(Default)]
+// 进程私有的 System V 信号量上下文：记录本进程打开的信号量集与 undo 记录。
 pub struct SemCtx {
-    pub arrays: BTreeMap<SemId, Arc<SemArr>>,
-    pub undos: BTreeMap<(SemId, SemNum), SemOp>,
+    pub arrays: BTreeMap<SemId, Arc<SemArr>>,       // semid -> 全局信号量数组
+    pub undos: BTreeMap<(SemId, SemNum), SemOp>, // 进程退出时需回滚的 semop 记录
 }
 impl SemCtx {
+    // 为本进程分配一个空闲 semid，并关联到全局信号量数组。
     pub fn add(&mut self, arr: Arc<SemArr>) -> SemId {
         let id = (0..).find(|i| !self.arrays.contains_key(i)).unwrap();
         self.arrays.insert(id, arr);
         id
     }
+    // 移除本进程对指定 semid 的引用。
     pub fn remove(&mut self, id: SemId) {
         self.arrays.remove(&id);
     }
+    // 寻找本进程内最小的空闲 semid。
     fn free_id(&self) -> SemId {
         (0..).find(|i| self.arrays.get(i).is_none()).unwrap()
     }
+    // 按 semid 获取对应的信号量数组。
     pub fn get(&self, id: SemId) -> Option<Arc<SemArr>> {
         self.arrays.get(&id).cloned()
     }
+    // 记录一次带 SEM_UNDO 的 semop，保存其反向操作以便进程退出时恢复。
     pub fn add_undo(&mut self, id: SemId, num: SemNum, op: SemOp) {
         let old = *self.undos.get(&(id, num)).unwrap_or(&0);
         self.undos.insert((id, num), old - op);
     }
 }
 impl Clone for SemCtx {
+    // fork 时继承信号量数组映射，但清空 undo 记录。
     fn clone(&self) -> Self {
         SemCtx {
             arrays: self.arrays.clone(),
@@ -4059,6 +4075,7 @@ impl Clone for SemCtx {
     }
 }
 impl Drop for SemCtx {
+    // 进程退出时按 undo 记录释放对应信号量。
     fn drop(&mut self) {
         for (&(id, num), &op) in &self.undos {
             if let Some(arr) = self.arrays.get(&id) {
@@ -4074,16 +4091,19 @@ impl Drop for SemCtx {
 type ShmId = usize;
 
 #[derive(Clone)]
+// 进程内共享内存段标签：描述一块共享内存在本进程中的附着信息。
 pub struct ShmTag {
-    pub addr: usize,
-    pub pages: Arc<Mutex<Vec<usize>>>,
+    pub addr: usize, // 附着到本进程地址空间的虚拟地址
+    pub pages: Arc<Mutex<Vec<usize>>>, // 共享页集合（全局共享）
 }
 impl ShmTag {
+    // 更新该共享段在本进程中的附着地址。
     pub fn set_addr(&mut self, a: usize) {
         self.addr = a;
     }
 }
 
+// 按 key 从全局 store 复用共享页集合，没有则创建 `npages` 个页槽。
 pub fn shm_get_or_create(
     key: usize,
     npages: usize,
@@ -4101,32 +4121,39 @@ pub fn shm_get_or_create(
 }
 
 #[derive(Default)]
+// 进程私有的共享内存上下文：记录本进程 attach 的共享内存段。
 pub struct ShmCtx {
-    pub ids: BTreeMap<ShmId, ShmTag>,
+    pub ids: BTreeMap<ShmId, ShmTag>, // shmid -> 共享内存标签
 }
 impl ShmCtx {
+    // 为本进程分配一个空闲 shmid，并关联到全局共享页集合。
     pub fn add(&mut self, g: Arc<Mutex<Vec<usize>>>) -> ShmId {
         let id = (0..).find(|i| !self.ids.contains_key(i)).unwrap();
         self.ids.insert(id, ShmTag { addr: 0, pages: g });
         id
     }
+    // 按 shmid 获取共享内存标签。
     pub fn get(&self, id: ShmId) -> Option<ShmTag> {
         self.ids.get(&id).cloned()
     }
+    // 设置或覆盖指定 shmid 的标签。
     pub fn set(&mut self, id: ShmId, tag: ShmTag) {
         self.ids.insert(id, tag);
     }
+    // 按附着地址反查 shmid（用于模拟 shmdt）。
     pub fn get_id_by_addr(&self, addr: usize) -> Option<ShmId> {
         self.ids
             .iter()
             .find(|(_, v)| v.addr == addr)
             .map(|(k, _)| *k)
     }
+    // 移除指定 shmid 的本地记录。
     pub fn pop(&mut self, id: ShmId) {
         self.ids.remove(&id);
     }
 }
 impl Clone for ShmCtx {
+    // fork 时复制本进程的共享内存段映射，使父子共享同一页集合。
     fn clone(&self) -> Self {
         ShmCtx {
             ids: self.ids.clone(),
